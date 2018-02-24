@@ -45,12 +45,9 @@ def process_raw(file_path, has_mask=True, save_human_readable_masks=False):
                 img_mask = mask.clone()
                 img_mask[img_mask != 0] += 10
                 io.imsave(file_path / '..' / f'{file.name}_mask.png', (img_mask * (1 / (masks.shape[0] + 10))).clip(0, 1))
-            # if len(mask_files) > 255:
-            #     print('too much masks', len(mask_files), file.name)
-            #     continue
             item['mask'] = torch.from_numpy(mask)
             item['distance_field'] = torch.from_numpy(distance_field(item['mask']).astype(np.float32))
         item['name'] = str(file).split('/')[-1]
-        item['img'] = torch.from_numpy(img)
+        item['img'] = torch.from_numpy(np.transpose(img, (2, 0, 1)))
         datas.append(item)
     return datas

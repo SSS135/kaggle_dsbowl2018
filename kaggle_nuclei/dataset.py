@@ -20,12 +20,20 @@ bad_ids = {
 }
 
 
+size = 128
+pad = 32
+
+
 class NucleiDataset(Dataset):
-    def __init__(self, data, source_transform, target_transform, padding=16, size=128):
-        self.datas = data # [d for d in data if d['mask'].max() < 255 and d['name'] not in bad_ids]
+    def __init__(self, data, source_transform, target_transform):
         self.has_mask = 'mask' in data[0]
         self.source_transform = source_transform
         self.target_transform = target_transform
+        self.padding = pad
+        if self.has_mask:
+            self.datas = [d for d in data if d['name'] not in bad_ids]
+        else:
+            self.datas = data
 
     def __getitem__(self, index):
         data = self.datas[index]
@@ -39,9 +47,9 @@ class NucleiDataset(Dataset):
         img = self.source_transform(img)
 
         if self.has_mask:
+            pad = self.padding
             mask = data['mask'].unsqueeze(0).long()
             sdf = torch.from_numpy(data['distance_field']).float().unsqueeze(0)
-            # sdf = sdf * 0.5 + 0.5
 
             torch.manual_seed(tseed)
             random.setstate(rstate)
@@ -49,16 +57,12 @@ class NucleiDataset(Dataset):
             torch.manual_seed(tseed)
             random.setstate(rstate)
             sdf = self.target_transform(sdf)
-            return img, mask[:, 16:-16, 16:-16], sdf[:, 16:-16, 16:-16], name
+            return img, mask[:, pad:-pad, pad:-pad], sdf[:, pad:-pad, pad:-pad], name
         else:
             return img, name
 
     def __len__(self):
         return len(self.datas)
-
-
-size = 128
-pad = 32
 
 
 def make_train_dataset(train_data):
