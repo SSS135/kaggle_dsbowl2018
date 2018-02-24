@@ -25,17 +25,24 @@ pad = 32
 
 
 class NucleiDataset(Dataset):
-    def __init__(self, data, source_transform, target_transform):
+    def __init__(self, data, source_transform, target_transform, supersample=1):
         self.has_mask = 'mask' in data[0]
         self.source_transform = source_transform
         self.target_transform = target_transform
         self.padding = pad
+        self.supersample = supersample
+        self.supersample_indexes = None
         if self.has_mask:
             self.datas = [d for d in data if d['name'] not in bad_ids]
         else:
             self.datas = data
 
     def __getitem__(self, index):
+        if self.supersample != 1:
+            if self.supersample_indexes is None or index + 1 == len(self):
+                self.supersample_indexes = np.random.randint(len(self.datas), size=len(self))
+            index = self.supersample_indexes[index]
+
         data = self.datas[index]
         img = data['img'].permute(2, 0, 1).float() / 255
         name = data['name']
@@ -48,12 +55,12 @@ class NucleiDataset(Dataset):
 
         if self.has_mask:
             pad = self.padding
-            mask = data['mask'].unsqueeze(0).long()
+            mask = data['mask'].float().unsqueeze(0)
             sdf = torch.from_numpy(data['distance_field']).float().unsqueeze(0)
 
             torch.manual_seed(tseed)
             random.setstate(rstate)
-            mask = self.target_transform(mask)
+            mask = self.target_transform(mask).round().long()
             torch.manual_seed(tseed)
             random.setstate(rstate)
             sdf = self.target_transform(sdf)
@@ -62,43 +69,30 @@ class NucleiDataset(Dataset):
             return img, name
 
     def __len__(self):
-        return len(self.datas)
+        return len(self.datas) * self.supersample
 
 
-def make_train_dataset(train_data):
+def make_train_dataset(train_data, affine=False, supersample=1):
     s_transf = tsf.Compose([
-        # tsf.ToPILImage(),
-        # tsf.Resize((size, size)),
-        # tsf.RandomCrop(size),
-        # tsf.RandomHorizontalFlip(),
-        # tsf.ToTensor(),
         MeanNormalize(),
         Pad(2 * (pad,), mode='reflect'),
+        *([tst.RandomAffine(rotation_range=180, zoom_range=(0.5, 2))] if affine else []),
         RandomCrop(2 * (size + pad,)),
         tst.RandomFlip(True, True),
-        # tsf.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     t_transf = tsf.Compose([
-        # tsf.ToPILImage(),
-        # tsf.Resize((size, size), interpolation=PIL.Image.NEAREST),
-        # tsf.RandomCrop(size),
-        # tsf.RandomHorizontalFlip(),
-        # tsf.ToTensor(),
-        Pad(2 * (pad,)),
+        Pad(2 * (pad,), mode='reflect'),
+        *([tst.RandomAffine(rotation_range=180, zoom_range=(0.5, 2))] if affine else []),
         RandomCrop(2 * (size + pad,)),
         tst.RandomFlip(True, True),
     ])
-    return NucleiDataset(train_data, s_transf, t_transf)
+    return NucleiDataset(train_data, s_transf, t_transf, supersample=supersample)
 
 
 def make_test_dataset(test_data):
     s_transf = tsf.Compose([
-        # tsf.ToPILImage(),
-        # tsf.Resize((size, size)),
-        # tsf.ToTensor(),
         MeanNormalize(),
         Pad(2 * (pad,), mode='reflect'),
         RandomCrop(2 * (size + pad,)),
-        # tsf.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     return NucleiDataset(test_data, s_transf, None)

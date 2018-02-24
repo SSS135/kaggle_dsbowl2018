@@ -9,9 +9,13 @@ from .dice_loss import soft_dice_loss
 from .iou import threshold_iou, iou
 import math
 import copy
+from .dataset import make_train_dataset
 
 
-def train_unet(dataloader, epochs=65):
+def train_unet(train_data, epochs=7, hard_example_subsample=1, affine_augmentation=False):
+    dataset = make_train_dataset(train_data, affine=affine_augmentation, supersample=hard_example_subsample)
+    dataloader = torch.utils.data.DataLoader(
+        dataset, shuffle=True, batch_size=4 * hard_example_subsample, pin_memory=True)
     model = UNet(3, 2).cuda()
     optimizer = torch.optim.SGD(get_param_groups(model), lr=0.03, momentum=0.9, weight_decay=5e-4)
     scheduler = CosineAnnealingRestartLR(optimizer, len(dataloader), 2)
@@ -32,7 +36,15 @@ def train_unet(dataloader, epochs=65):
                 out_mask, out_sdf = model(x_train)[:, :, pad:-pad, pad:-pad].chunk(2, 1)
                 out_mask, out_sdf = F.sigmoid(out_mask), out_sdf.contiguous()
                 mask_target = (mask_train > 0).float().clamp(min=0.05, max=0.95)
-                loss = soft_dice_loss(out_mask, mask_target) + F.mse_loss(out_sdf, sdf_train)
+                sdf_loss = F.mse_loss(out_sdf, sdf_train, reduce=False).view(x_train.shape[0], -1).mean(-1)
+                if hard_example_subsample != 1:
+                    keep_count = max(1, x_train.shape[0] // hard_example_subsample)
+                    keep_idx = sdf_loss.sort()[1][-keep_count:]
+                    bce_loss = F.binary_cross_entropy(out_mask[keep_idx], mask_target[keep_idx])
+                    loss = sdf_loss[keep_idx].mean() + bce_loss
+                else:
+                    dice_loss = soft_dice_loss(out_mask, mask_target)
+                    loss = sdf_loss.mean() + dice_loss
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
