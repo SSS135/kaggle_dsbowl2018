@@ -1,6 +1,7 @@
-import skfmm
-import numpy as np
 from itertools import count
+
+import numpy as np
+import skfmm
 
 
 def distance_field(data, clip=(-1, 1)):

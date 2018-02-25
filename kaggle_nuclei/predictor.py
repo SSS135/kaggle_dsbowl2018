@@ -1,14 +1,13 @@
+import math
+
 import numpy as np
+import scipy.misc
+import torch
+import torch.nn.functional as F
 from skimage.transform import resize
 from torch.autograd import Variable
-import torch.nn.functional as F
-from torchsample.utils import th_affine2d
-import torch
-from skimage import io
-import scipy.misc
-import math
 from tqdm import tqdm
-import torchvision.transforms as tsf
+from .dataset import resnet_norm_mean, resnet_norm_std
 
 
 def predict(model, raw_data, max_scale=4, tested_scales=15, pad=32):
@@ -17,7 +16,7 @@ def predict(model, raw_data, max_scale=4, tested_scales=15, pad=32):
     max_scale = math.log10(max_scale)
     scales = np.logspace(-max_scale, max_scale, num=tested_scales)
 
-    mean_std_sub = torch.FloatTensor([[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]).cuda()
+    mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
 
     results = []
     for data in tqdm(raw_data):

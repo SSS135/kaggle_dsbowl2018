@@ -1,8 +1,7 @@
 # https://github.com/kuangliu/pytorch-fpn/blob/master/fpn.py
 
-import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 from torchvision.models.resnet import ResNet, Bottleneck, model_zoo, model_urls
 
 

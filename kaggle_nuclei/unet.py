@@ -1,8 +1,8 @@
 # sub-parts of the U-Net model
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 
 class DoubleConv(nn.Module):

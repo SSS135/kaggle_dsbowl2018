@@ -1,6 +1,5 @@
-import numpy as np
-from itertools import count
 import numba
+import numpy as np
 
 
 def iou(pred, target, bin_threshold=0.5):
@@ -38,6 +37,7 @@ def object_iou(pred_labels, target_labels):
     pred_status, target_status = np.zeros(pred_count), np.zeros(target_count)
     for t_idx in range(1, target_count + 1):
         t_label = target_labels == t_idx
+        assert t_label.sum() != 0
         p_overlap_idx = np.unique(pred_labels * t_label)
         for p_idx in p_overlap_idx:
             if p_idx == 0:

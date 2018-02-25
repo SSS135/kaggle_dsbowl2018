@@ -1,4 +1,3 @@
-import PIL
 import torch
 import torchvision.transforms as tsf
 from torch.utils.data import Dataset
@@ -6,9 +5,17 @@ import random
 import sys
 import numpy as np
 import torchsample.transforms as tst
-import torch.nn.functional as F
-from .transforms import MeanNormalize, RandomCrop, Pad
+from .transforms import RandomCrop, Pad
+import random
+import sys
 
+import numpy as np
+import torch
+import torchsample.transforms as tst
+import torchvision.transforms as tsf
+from torch.utils.data import Dataset
+
+from .transforms import RandomCrop, Pad
 
 bad_ids = {
     '19f0653c33982a416feed56e5d1ce6849fd83314fd19dfa1c5b23c6b66e9868a', # very many mistakes
@@ -22,6 +29,8 @@ bad_ids = {
 
 size = 128
 pad = 32
+resnet_norm_mean = [0.485, 0.456, 0.406]
+resnet_norm_std = [0.229, 0.224, 0.225]
 
 
 class NucleiDataset(Dataset):
@@ -75,7 +84,7 @@ class NucleiDataset(Dataset):
 def make_train_dataset(train_data, affine=False, supersample=1):
     s_transf = tsf.Compose([
         # MeanNormalize(),
-        tsf.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
         Pad(2 * (pad,), mode='reflect'),
         *([tst.RandomAffine(rotation_range=180, zoom_range=(0.5, 2))] if affine else []),
         RandomCrop(2 * (size + pad * 2,)),

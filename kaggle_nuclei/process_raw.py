@@ -1,9 +1,10 @@
 from pathlib import Path
+
 import numpy as np
 import torch
 from skimage import io
 from tqdm import tqdm
-from collections import namedtuple
+
 from .distance_field import distance_field
 
 

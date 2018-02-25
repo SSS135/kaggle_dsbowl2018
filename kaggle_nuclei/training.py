@@ -1,20 +1,20 @@
-from torch.autograd import Variable
-
-from .unet import UNet
-import torch
-from optfn.param_groups_getter import get_param_groups
-from optfn.cosine_annealing import CosineAnnealingRestartLR
-from tqdm import tqdm
-import sys
-import torch.nn.functional as F
-from .losses import soft_dice_loss, clipped_mse_loss, dice_loss
-from .iou import threshold_iou, iou
-import math
 import copy
-from .dataset import make_train_dataset
+import math
+import sys
+
+import torch
+import torch.nn.functional as F
 import torch.utils.data
-from .feature_pyramid_network import FPN
+from optfn.cosine_annealing import CosineAnnealingRestartLR
 from optfn.gadam import GAdam
+from optfn.param_groups_getter import get_param_groups
+from torch.autograd import Variable
+from tqdm import tqdm
+
+from .dataset import make_train_dataset
+from .feature_pyramid_network import FPN
+from .iou import threshold_iou, iou
+from .losses import dice_loss
 
 
 def train_preprocessor(train_data, epochs=15, pretrain_epochs=7, hard_example_subsample=1, affine_augmentation=False):
@@ -22,7 +22,7 @@ def train_preprocessor(train_data, epochs=15, pretrain_epochs=7, hard_example_su
     dataloader = torch.utils.data.DataLoader(
         dataset, shuffle=True, batch_size=4 * hard_example_subsample, pin_memory=True)
     model = FPN(3).cuda()
-    optimizer = GAdam(get_param_groups(model), lr=0.0001, avg_sq_mode='tensor', nesterov=0.0, amsgrad=False, weight_decay=5e-2)
+    optimizer = GAdam(get_param_groups(model), lr=0.0001, avg_sq_mode='tensor', nesterov=0.0, amsgrad=False, weight_decay=5e-3)
     scheduler = CosineAnnealingRestartLR(optimizer, len(dataloader), 2)
     pad = dataloader.dataset.padding
     best_model = model

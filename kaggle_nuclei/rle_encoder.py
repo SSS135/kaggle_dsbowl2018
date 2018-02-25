@@ -1,6 +1,6 @@
 import numpy as np
-from skimage.morphology import label
 import pandas as pd
+from skimage.morphology import label
 
 
 # Run-length encoding stolen from https://www.kaggle.com/rakhlin/fast-run-length-encoding-python
