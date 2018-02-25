@@ -8,6 +8,7 @@ from skimage import io
 import scipy.misc
 import math
 from tqdm import tqdm
+import torchvision.transforms as tsf
 
 
 def predict(model, raw_data, max_scale=4, tested_scales=15, pad=32):
@@ -16,21 +17,26 @@ def predict(model, raw_data, max_scale=4, tested_scales=15, pad=32):
     max_scale = math.log10(max_scale)
     scales = np.logspace(-max_scale, max_scale, num=tested_scales)
 
+    mean_std_sub = torch.FloatTensor([[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]).cuda()
+
     results = []
     for data in tqdm(raw_data):
         img = data['img'].numpy().transpose(1, 2, 0)
         out_mean = np.zeros((*img.shape[:2], 3))
         sum_count = 0
         for scale in scales:
-            s_shape = (np.array(img.shape) * scale / 16).round().astype(int) * 16 + pad * 2
+            div = 32
+            s_shape = (np.array(img.shape) * scale / div).round().astype(int) * div + pad * 2
             if np.max(s_shape) > 2048:
                 # print(f'ignoring scale {scale}, size {tuple(s_shape)}, '
                 #       f'source size {tuple(img.shape)} for {data["name"][:16]}')
                 continue
+
             x = scipy.misc.imresize(img, s_shape).astype(np.float32) / 255
-            x = x - x.mean()
+            # x = x - x.mean()
             x = x.transpose(2, 0, 1)
             x = torch.from_numpy(x).unsqueeze(0).cuda()
+            x = (x - mean_std_sub[0].view(1, -1, 1, 1)) / mean_std_sub[1].view(1, -1, 1, 1)
             out = []
             flips = [
                 lambda v: v,

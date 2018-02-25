@@ -64,9 +64,9 @@ class NucleiDataset(Dataset):
             torch.manual_seed(tseed)
             random.setstate(rstate)
             sdf = self.target_transform(sdf)
-            return img, mask[:, pad:-pad, pad:-pad], sdf[:, pad:-pad, pad:-pad], name
+            return img, mask[:, pad:-pad, pad:-pad], sdf[:, pad:-pad, pad:-pad]
         else:
-            return img, name
+            return img
 
     def __len__(self):
         return len(self.datas) * self.supersample
@@ -74,25 +74,26 @@ class NucleiDataset(Dataset):
 
 def make_train_dataset(train_data, affine=False, supersample=1):
     s_transf = tsf.Compose([
-        MeanNormalize(),
+        # MeanNormalize(),
+        tsf.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         Pad(2 * (pad,), mode='reflect'),
         *([tst.RandomAffine(rotation_range=180, zoom_range=(0.5, 2))] if affine else []),
-        RandomCrop(2 * (size + pad,)),
+        RandomCrop(2 * (size + pad * 2,)),
         tst.RandomFlip(True, True),
     ])
     t_transf = tsf.Compose([
         Pad(2 * (pad,), mode='reflect'),
         *([tst.RandomAffine(rotation_range=180, zoom_range=(0.5, 2))] if affine else []),
-        RandomCrop(2 * (size + pad,)),
+        RandomCrop(2 * (size + pad * 2,)),
         tst.RandomFlip(True, True),
     ])
     return NucleiDataset(train_data, s_transf, t_transf, supersample=supersample)
 
 
-def make_test_dataset(test_data):
-    s_transf = tsf.Compose([
-        MeanNormalize(),
-        Pad(2 * (pad,), mode='reflect'),
-        RandomCrop(2 * (size + pad,)),
-    ])
-    return NucleiDataset(test_data, s_transf, None)
+# def make_test_dataset(test_data):
+#     s_transf = tsf.Compose([
+#         MeanNormalize(),
+#         Pad(2 * (pad,), mode='reflect'),
+#         RandomCrop(2 * (size + pad * 2,)),
+#     ])
+#     return NucleiDataset(test_data, s_transf, None)

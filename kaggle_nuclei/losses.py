@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 
 def dice_loss(inputs, targets, reduce=True):
