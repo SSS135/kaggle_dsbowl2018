@@ -44,7 +44,7 @@ class NucleiDataset(Dataset):
             index = self.supersample_indexes[index]
 
         data = self.datas[index]
-        img = data['img'].permute(2, 0, 1).float() / 255
+        img = data['img'].float() / 255
         name = data['name']
 
         rstate = random.getstate()
@@ -56,7 +56,7 @@ class NucleiDataset(Dataset):
         if self.has_mask:
             pad = self.padding
             mask = data['mask'].float().unsqueeze(0)
-            sdf = torch.from_numpy(data['distance_field']).float().unsqueeze(0)
+            sdf = data['distance_field'].unsqueeze(0)
 
             torch.manual_seed(tseed)
             random.setstate(rstate)

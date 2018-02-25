@@ -1,3 +1,5 @@
+from torch.autograd import Variable
+
 from .unet import UNet
 import torch
 from optfn.param_groups_getter import get_param_groups
@@ -5,18 +7,19 @@ from optfn.cosine_annealing import CosineAnnealingRestartLR
 from tqdm import tqdm
 import sys
 import torch.nn.functional as F
-from .dice_loss import soft_dice_loss
+from .losses import soft_dice_loss, clipped_mse_loss, dice_loss
 from .iou import threshold_iou, iou
 import math
 import copy
 from .dataset import make_train_dataset
+import torch.utils.data
 
 
 def train_unet(train_data, epochs=7, hard_example_subsample=1, affine_augmentation=False):
     dataset = make_train_dataset(train_data, affine=affine_augmentation, supersample=hard_example_subsample)
     dataloader = torch.utils.data.DataLoader(
         dataset, shuffle=True, batch_size=4 * hard_example_subsample, pin_memory=True)
-    model = UNet(3, 2).cuda()
+    model = UNet(3, 3).cuda()
     optimizer = torch.optim.SGD(get_param_groups(model), lr=0.03, momentum=0.9, weight_decay=5e-4)
     scheduler = CosineAnnealingRestartLR(optimizer, len(dataloader), 2)
     pad = dataloader.dataset.padding
@@ -32,19 +35,28 @@ def train_unet(train_data, epochs=7, hard_example_subsample=1, affine_augmentati
                 x_train = torch.autograd.Variable(img.cuda())
                 sdf_train = torch.autograd.Variable(sdf.cuda())
                 mask_train = torch.autograd.Variable(mask.cuda())
+
+                cont_train = 1 - sdf_train.data ** 2
+                cont_train = (cont_train.clamp(0.9, 1) - 0.9) * 20 - 1
+                cont_train = Variable(cont_train)
+
                 optimizer.zero_grad()
-                out_mask, out_sdf = model(x_train)[:, :, pad:-pad, pad:-pad].chunk(2, 1)
+                out_mask, out_sdf, out_cont = model(x_train)[:, :, pad:-pad, pad:-pad].chunk(3, 1)
                 out_mask, out_sdf = F.sigmoid(out_mask), out_sdf.contiguous()
+
                 mask_target = (mask_train > 0).float().clamp(min=0.05, max=0.95)
-                sdf_loss = F.mse_loss(out_sdf, sdf_train, reduce=False).view(x_train.shape[0], -1).mean(-1)
+                sdf_loss = clipped_mse_loss(out_sdf, sdf_train, -1, 1, reduce=False).view(x_train.shape[0], -1).mean(-1)
+                cont_loss = clipped_mse_loss(out_cont, cont_train, -1, 1, reduce=False).view(x_train.shape[0], -1).mean(-1)
                 if hard_example_subsample != 1:
                     keep_count = max(1, x_train.shape[0] // hard_example_subsample)
-                    keep_idx = sdf_loss.sort()[1][-keep_count:]
-                    bce_loss = F.binary_cross_entropy(out_mask[keep_idx], mask_target[keep_idx])
-                    loss = sdf_loss[keep_idx].mean() + bce_loss
+                    mse_mask_loss = F.mse_loss(out_mask, mask_target, reduce=False).view(x_train.shape[0], -1).mean(-1)
+                    sort_loss = sdf_loss + cont_loss + mse_mask_loss
+                    keep_idx = sort_loss.sort()[1][-keep_count:]
+                    dice_loss = soft_dice_loss(out_mask[keep_idx], mask_target[keep_idx])
+                    loss = sdf_loss[keep_idx].mean() + cont_loss[keep_idx].mean() + dice_loss
                 else:
                     dice_loss = soft_dice_loss(out_mask, mask_target)
-                    loss = sdf_loss.mean() + dice_loss
+                    loss = sdf_loss.mean() + dice_loss + cont_loss.mean()
                 loss.backward()
                 optimizer.step()
                 scheduler.step()

@@ -18,25 +18,39 @@ def predict(model, raw_data, max_scale=4, tested_scales=15, pad=32):
 
     results = []
     for data in tqdm(raw_data):
-        img = data['img'].numpy()
-        out_mean = np.zeros((*img.shape[:2], 2))
+        img = data['img'].numpy().transpose(1, 2, 0)
+        out_mean = np.zeros((*img.shape[:2], 3))
+        sum_count = 0
         for scale in scales:
-            s_shape = (np.array(img.shape) * scale / 16).round().astype(int) * 16
-            if np.max(s_shape) > 768:
+            s_shape = (np.array(img.shape) * scale / 16).round().astype(int) * 16 + pad * 2
+            if np.max(s_shape) > 2048:
+                # print(f'ignoring scale {scale}, size {tuple(s_shape)}, '
+                #       f'source size {tuple(img.shape)} for {data["name"][:16]}')
                 continue
             x = scipy.misc.imresize(img, s_shape).astype(np.float32) / 255
             x = x - x.mean()
             x = x.transpose(2, 0, 1)
             x = torch.from_numpy(x).unsqueeze(0).cuda()
-            x = torch.cat([x, flip(x, 2), flip(x, 3), flip(flip(x, 3), 2)])
-            x = Variable(x, volatile=True)
-            x = F.pad(x, 4 * (pad,), mode='reflect')
-            out = model(x)
-            out = out.data[:, :, pad:-pad, pad:-pad]
-            out = out[0].add_(flip(out[1], 1)).add_(flip(out[2], 2)).add_(flip(flip(out[3], 2), 1)).div_(4 * tested_scales)
+            out = []
+            flips = [
+                lambda v: v,
+                lambda v: flip(v, 2),
+                lambda v: flip(v, 3),
+                lambda v: flip(flip(v, 3), 2)
+            ]
+            for f in flips:
+                s = f(x)
+                s = F.pad(s, 4 * (pad,), mode='reflect')
+                s = model(Variable(s.data.contiguous(), volatile=True)).data
+                s = s[:, :, pad:-pad, pad:-pad]
+                s = f(s).cpu()
+                out.append(s)
+            out = torch.cat(out, 0).sum(0).div_(4)
             out = out.cpu().numpy()
             out = np.stack([scipy.misc.imresize(o, img.shape[:2], mode='F') for o in out], 2)
             out_mean += out
+            sum_count += 1
+        out_mean /= sum_count
         results.append(out_mean)
     return results
 

@@ -82,9 +82,8 @@ class OutConv(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, n_classes):
+    def __init__(self, n_channels, n_classes, f=64):
         super(UNet, self).__init__()
-        f = 64
         self.inc = InConv(n_channels, f)
         self.down1 = Down(f, 2 * f)
         self.down2 = Down(2 * f, 4 * f)
