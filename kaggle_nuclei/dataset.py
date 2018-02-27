@@ -54,7 +54,6 @@ class NucleiDataset(Dataset):
 
         data = self.datas[index]
         img = data['img'].float() / 255
-        name = data['name']
 
         rstate = random.getstate()
         tseed = random.randrange(sys.maxsize)

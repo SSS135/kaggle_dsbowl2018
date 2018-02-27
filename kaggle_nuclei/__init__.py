@@ -7,3 +7,4 @@ from .predictor import predict
 from .rle_encoder import prob_to_rles, save_csv
 from .feature_pyramid_network import FPN
 from .training import train_preprocessor
+from .postprocessor_training import train_postprocessor_ppo, train_postprocessor_es

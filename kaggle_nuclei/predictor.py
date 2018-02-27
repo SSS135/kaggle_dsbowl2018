@@ -21,7 +21,7 @@ def predict(model, raw_data, max_scale=4, tested_scales=15, pad=32):
     results = []
     for data in tqdm(raw_data):
         img = data['img'].numpy().transpose(1, 2, 0)
-        out_mean = np.zeros((*img.shape[:2], 3))
+        out_mean = np.zeros((*img.shape[:2], 3), np.float32)
         sum_count = 0
         for scale in scales:
             div = 32
