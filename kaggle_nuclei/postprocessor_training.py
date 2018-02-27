@@ -40,7 +40,7 @@ except:
 
 
 def train_postprocessor_ppo(train_data, train_pred, epochs=7):
-    num_actors = 16
+    num_actors = 4
 
     dataset = PostprocessingDataset(train_data, train_pred)
     dataloader = torch.utils.data.DataLoader(
@@ -49,7 +49,7 @@ def train_postprocessor_ppo(train_data, train_pred, epochs=7):
     ppo = rl.ppo.PPO(
         gym.spaces.Box(-1, 1, 3 * (size + pad * 2) ** 2), gym.spaces.Box(-1, 1, 128 * 128),
         num_actors=num_actors,
-        optimizer_factory=partial(GAdam, lr=0.0001, avg_sq_mode='weight', amsgrad=True, weight_decay=1e-4),
+        optimizer_factory=partial(GAdam, lr=0.00003, avg_sq_mode='weight', amsgrad=True, weight_decay=1e-4),
         policy_clip=0.2,
         value_clip=0.001,
         ppo_iters=1,
@@ -57,14 +57,14 @@ def train_postprocessor_ppo(train_data, train_pred, epochs=7):
         grad_clip_norm=2,
         horizon=1,
         batch_size=4,
-        model_factory=SimpleCNNActor,
+        model_factory=UNetActorCritic,
         image_observation=False,
         cuda_eval=True,
         cuda_train=True,
         reward_discount=1,
         advantage_discount=1,
         value_loss_scale=0.1,
-        entropy_bonus=1e-4,
+        entropy_bonus=1e-5,
         reward_scale=1.0,
         lr_scheduler_factory=None,
         clip_decay_factory=None,
@@ -87,10 +87,10 @@ def train_postprocessor_ppo(train_data, train_pred, epochs=7):
                 rl_input = pred_msc # np.concatenate([img, pred_msc], 1)
                 rl_input = rl_input.reshape(rl_input.shape[0], -1)
                 actions = ppo.eval(rl_input)
-                actions = actions.reshape(-1, 1, size, size)
-                actions = Variable(torch.from_numpy(actions), volatile=True)
-                actions = F.avg_pool2d(actions, kernel_size=17, stride=1, padding=8)
-                actions = actions.data.numpy().reshape(-1, size, size)
+                actions = actions.reshape(-1, size, size)
+                # actions = Variable(torch.from_numpy(actions), volatile=True)
+                # actions = F.avg_pool2d(actions, kernel_size=17, stride=1, padding=8)
+                # actions = actions.data.numpy().reshape(-1, size, size)
 
                 rl_mask = pred_unpad_mask + actions
 

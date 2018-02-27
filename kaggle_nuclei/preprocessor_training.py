@@ -10,26 +10,36 @@ from optfn.gadam import GAdam
 from optfn.param_groups_getter import get_param_groups
 from torch.autograd import Variable
 from tqdm import tqdm
+from torch import nn
 
 from .dataset import make_train_dataset
 from .feature_pyramid_network import FPN
 from .iou import threshold_iou, iou
 from .losses import dice_loss, soft_dice_loss, clipped_mse_loss
 from .unet import UNet
+from .ms_d_net import MSDNet
 
 
 def train_preprocessor(train_data, epochs=15, pretrain_epochs=7, hard_example_subsample=1,
-                       affine_augmentation=False, resnet=True):
+                       affine_augmentation=False, network='msd'):
     dataset = make_train_dataset(train_data, affine=affine_augmentation, supersample=hard_example_subsample)
     dataloader = torch.utils.data.DataLoader(
         dataset, shuffle=True, batch_size=4 * hard_example_subsample, pin_memory=True)
-    if resnet:
+
+    if network == 'resnet':
         model = FPN(3).cuda()
         optimizer = GAdam(get_param_groups(model), lr=0.0001, nesterov=0.0, weight_decay=5e-4,
                           avg_sq_mode='tensor', amsgrad=False)
-    else:
+    elif network == 'unet':
         model = UNet(3, 3).cuda()
         optimizer = torch.optim.SGD(get_param_groups(model), lr=0.03, momentum=0.9, weight_decay=5e-4)
+    elif network == 'msd':
+        model = MSDNet(3, 3, map_channels=8, width=4, layers=10, dilations=[1, 3, 7, 15]).cuda()
+        optimizer = GAdam(get_param_groups(model), lr=0.0003, nesterov=0.0, weight_decay=5e-4,
+                          avg_sq_mode='weight', amsgrad=False)
+    else:
+        raise ValueError()
+
     scheduler = CosineAnnealingRestartLR(optimizer, len(dataloader), 2)
     pad = dataloader.dataset.padding
     best_model = model
@@ -39,7 +49,7 @@ def train_preprocessor(train_data, epochs=15, pretrain_epochs=7, hard_example_su
 
     for epoch in range(epochs):
         with tqdm(dataloader) as pbar:
-            if resnet:
+            if network == 'resnet':
                 model.freeze_pretrained_layers(epoch < pretrain_epochs)
             t_iou_ma, f_iou_ma, sdf_loss_ma, cont_loss_ma = 0, 0, 0, 0
             for i, (img, mask, sdf) in enumerate(pbar):

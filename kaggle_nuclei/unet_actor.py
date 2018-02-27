@@ -43,7 +43,7 @@ class UNetActorCritic(rl.models.Actor):
         input = input.view(bs, 3, size + pad * 2, size + pad * 2)
         x = self.unet(input)[:, :, pad:-pad, pad:-pad]
         values, mean, logstd = torch.unbind(x, 1)
-        # values = values * 0
+        values = values * 0
         values = values.contiguous().view(bs, -1).mean(-1)
         probs = torch.cat([mean.contiguous().view(bs, -1), logstd.contiguous().view(bs, -1)], 1)
         return rl.models.ActorOutput(probs=probs, state_values=values)
@@ -70,7 +70,7 @@ class SimpleCNNActor(rl.models.Actor):
         # probs = x[:, 1:]
 
         values, mean, logstd = torch.unbind(x, 1)
-        # values = values * 0
+        values = values * 0
         values = values.contiguous().view(bs, -1).mean(-1)
         probs = torch.cat([mean.contiguous().view(bs, -1), logstd.contiguous().view(bs, -1)], 1)
         return rl.models.ActorOutput(probs=probs, state_values=values)
