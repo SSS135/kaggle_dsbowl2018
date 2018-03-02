@@ -38,7 +38,7 @@ def train_preprocessor_gan(train_data, epochs=15, pretrain_epochs=7, affine_augm
     gen_optimizer = GAdam(get_param_groups(gen_model), lr=5e-5, betas=(0.5, 0.999),
                           amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=True)
 
-    disc_model = GanD(6).cuda()
+    disc_model = GanD_UNet(6).cuda()
     disc_optimizer = GAdam(get_param_groups(disc_model), lr=5e-5, betas=(0.5, 0.999),
                            amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=True)
 
@@ -180,6 +180,7 @@ def weights_init(m):
 
 def split_labels(mask, num_split_channels):
     assert num_split_channels >= 2
+    assert mask.dim() == 4
     mask_label_count = mask.max()
     split_mask = mask.new(mask.shape[0], num_split_channels, *mask.shape[2:]).byte().fill_(0)
     if mask_label_count == 0:
@@ -239,7 +240,7 @@ class GanD_UNet(nn.Module):
         # output = features
         # while output.shape[2] >= self.conv.kernel_size[0]:
         #     output = self.conv(output)
-        output = features.view(input.shape[0], -1).mean()
+        output = features.view(input.shape[0], -1).mean(-1)
         # output = features.view(*features.shape[:2], -1)
         # output = torch.cat([output.mean(-1), output.std(-1)], 1)
         # output = self.head(output).view(-1)
