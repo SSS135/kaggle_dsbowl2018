@@ -1,6 +1,12 @@
 import random
+import math
 
+import torch
+import scipy
+import scipy.misc
+import scipy.ndimage
 import torch.nn.functional as F
+import numpy as np
 
 
 class MeanNormalize:
@@ -25,6 +31,103 @@ class Pad:
 
     def __call__(self, x):
         return F.pad(x, pad=self.size, mode=self.mode).data
+
+
+class AffineCrop:
+    def __init__(self, size, padding=0, rotation=(0, 0), scale=(1, 1), pad_mode='constant'):
+        self.size = size
+        self.padding = padding
+        self.rotation = rotation
+        self.scale = scale
+        self.pad_mode = pad_mode
+
+    def __call__(self, input):
+        x = input.cpu().numpy()
+        if input.dim() == 2:
+            x = np.expand_dims(x, 0)
+        x = x.transpose((1, 2, 0))
+
+        rotation = math.radians(random.uniform(self.rotation[0], self.rotation[1]))
+        scale = math.exp(random.uniform(math.log(self.scale[0]), math.log(self.scale[1])))
+        rot_padded_size = np.abs(self.rotate_vec_2d(self.size, self.size, rotation)).max()
+        # FIXME: 1.05 will fix corners, too lazy for math
+        if abs(rotation) > 1:
+            rot_padded_size *= 1.05
+        rot_padded_scaled_size = math.ceil(rot_padded_size / scale)
+        rot_padded_size = math.ceil(rot_padded_size)
+
+        rot_pad = round((rot_padded_size - self.size) / 2)
+        pad = min(rot_padded_scaled_size - 1, self.padding)
+        crop_y = round(random.uniform(-pad, x.shape[0] - rot_padded_scaled_size + pad))
+        crop_x = round(random.uniform(-pad, x.shape[1] - rot_padded_scaled_size + pad))
+
+        crop_rect = (crop_y, crop_x, rot_padded_scaled_size, rot_padded_scaled_size)
+        x = self.padded_crop(x, crop_rect, self.pad_mode)
+        x = self.affine_transform(x, scale, rotation, (rot_padded_size, rot_padded_size, x.shape[2]))
+        x = x[rot_pad: rot_pad + self.size, rot_pad: rot_pad + self.size]
+
+        x = x.transpose((2, 0, 1))
+        if input.dim() == 2:
+            x = x.squeeze(0)
+        x = torch.from_numpy(x).type_as(input)
+        return x
+
+    @staticmethod
+    def affine_transform(x, scale, rot, out_shape):
+        c_in = 0.5 * np.array(x.shape)
+        c_out = 0.5 * np.array(out_shape)
+
+        rot_transform = np.array([
+            [math.cos(rot), math.sin(rot), 0],
+            [-math.sin(rot), math.cos(rot), 0],
+            [0, 0, 1]
+        ])
+        scale_transform = np.array([
+            [1 / scale, 0, 0],
+            [0, 1 / scale, 0],
+            [0, 0, 1]
+        ])
+        transform = scale_transform @ rot_transform
+        offset = c_in - c_out @ transform.T
+        offset[2] = 0
+
+        dst = scipy.ndimage.interpolation.affine_transform(
+            x,
+            transform,
+            order=1,
+            offset=offset,
+            output_shape=out_shape,
+        )
+        return dst
+
+    @staticmethod
+    def padded_crop(x, rect, pad_mode='constant'):
+        """ rect == (y, x, h, w) """
+        rect = (rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3])
+        allowed_rect = (
+            min(max(rect[0], 0), x.shape[0]),
+            min(max(rect[1], 0), x.shape[1]),
+            min(max(rect[2], 0), x.shape[0]),
+            min(max(rect[3], 0), x.shape[1]),
+        )
+        padding = (
+            allowed_rect[0] - rect[0],
+            allowed_rect[1] - rect[1],
+            rect[2] - allowed_rect[2],
+            rect[3] - allowed_rect[3],
+        )
+
+        atop, aleft, abot, aright = allowed_rect
+        x = x[atop: abot, aleft: aright]
+        ptop, pleft, pbot, pright = padding
+        x = np.pad(x, ((ptop, pbot), (pleft, pright), (0, 0)), pad_mode)
+        return x
+
+    @staticmethod
+    def rotate_vec_2d(y, x, radians):
+        ca = math.cos(radians)
+        sa = math.sin(radians)
+        return ca * x - sa * y, sa * x + ca * y
 
 
 # class RandomResize:

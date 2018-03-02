@@ -5,7 +5,7 @@ import random
 import sys
 import numpy as np
 import torchsample.transforms as tst
-from .transforms import RandomCrop, Pad
+from .transforms import RandomCrop, Pad, AffineCrop
 import random
 import sys
 
@@ -27,7 +27,7 @@ bad_ids = {
 }
 
 
-size = 128
+size = 64
 pad = 32
 resnet_norm_mean = [0.485, 0.456, 0.406]
 resnet_norm_std = [0.229, 0.224, 0.225]
@@ -82,17 +82,12 @@ class NucleiDataset(Dataset):
 
 def make_train_dataset(train_data, affine=False, supersample=1):
     s_transf = tsf.Compose([
-        # MeanNormalize(),
-        tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
-        Pad(2 * (pad,), mode='reflect'),
-        *([tst.RandomAffine(rotation_range=180, zoom_range=(0.5, 2))] if affine else []),
-        RandomCrop(2 * (size + pad * 2,)),
+        AffineCrop(size + pad * 2, padding=size // 2, rotation=(-180, 180), scale=(0.25, 4), pad_mode='reflect'),
         tst.RandomFlip(True, True),
+        tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
     ])
     t_transf = tsf.Compose([
-        Pad(2 * (pad,), mode='reflect'),
-        *([tst.RandomAffine(rotation_range=180, zoom_range=(0.5, 2))] if affine else []),
-        RandomCrop(2 * (size + pad * 2,)),
+        AffineCrop(size + pad * 2, padding=size // 2, rotation=(-180, 180), scale=(0.25, 4), pad_mode='reflect'),
         tst.RandomFlip(True, True),
     ])
     return NucleiDataset(train_data, s_transf, t_transf, supersample=supersample)

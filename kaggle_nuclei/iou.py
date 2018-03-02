@@ -1,19 +1,23 @@
 import numba
 import numpy as np
+import torch
 
 
 def iou(pred, target, bin_threshold=0.5):
-    pred = pred.data > bin_threshold
-    target = target.data > 0
-    union = (pred | target).sum()
-    if union == 0:
-        return 1
-    else:
-        return (pred & target).sum() / union
+    assert pred.dim() > 2 and pred.shape == target.shape
+    pred = pred > bin_threshold
+    target = target > 0
+    bs = pred.shape[0]
+    pred, target = pred.view(bs, -1), target.view(bs, -1)
+    union = (pred | target).long().sum(-1)
+    intersection = (pred & target).long().sum(-1)
+    metric = intersection.float() / union.clamp(min=1).float()
+    metric[union == 0] = 1
+    return metric
 
 
 def threshold_iou(iou, tmin=0.5, tmax=0.95, steps=10):
-    return (iou > np.linspace(tmin, tmax, steps)).mean()
+    return (iou.unsqueeze(1) > torch.linspace(tmin, tmax, steps).type_as(iou)).float().mean(1)
 
 
 # @numba.jit
