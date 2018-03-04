@@ -15,7 +15,6 @@ from torch.autograd import Variable
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from .dataset import make_train_dataset
 from .dataset import pad, size
 from .iou import threshold_iou, iou
 from .losses import dice_loss

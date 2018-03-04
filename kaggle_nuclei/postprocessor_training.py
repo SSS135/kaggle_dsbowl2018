@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from scipy.ndimage import gaussian_filter
 
-from .dataset import make_train_dataset
+from .dataset import NucleiDataset
 from .dataset import pad, size
 from .iou import mean_threshold_object_iou, iou, threshold_iou
 from .losses import dice_loss

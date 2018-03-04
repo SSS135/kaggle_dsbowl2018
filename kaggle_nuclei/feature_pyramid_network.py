@@ -2,48 +2,48 @@
 
 import torch.nn.functional as F
 from torch import nn
-from torchvision.models.resnet import ResNet, Bottleneck, model_zoo, model_urls
+from torchvision.models.resnet import ResNet, Bottleneck, model_zoo, model_urls, resnet50
+import torch
 
 
 class MaskMLP(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
+        self.net100 = nn.Sequential(
+            nn.Conv2d(in_channels, 512, 4),
+            nn.Conv2d(512, 16 * 16 + 1, 1),
+        )
+        self.net150 = nn.Sequential(
+            nn.Conv2d(in_channels, 512, 6),
+            nn.Conv2d(512, 16 * 16 + 1, 1),
+        )
+
+    def reshape(self, x):
+        mask, score = x.split(16 * 16, 1)
+        mask, score = mask.contiguous(), score.contiguous()
+        mask = mask.view(mask.shape[0], 1, *mask.shape[2:], 16, 16)
+        return mask, score
+
+    def forward(self, input, include_large_scale):
+        x100 = self.net100(input)
+        m100, s100 = self.reshape(x100)
+        if include_large_scale:
+            x150 = self.net150(input)
+            m150, s150 = self.reshape(x150)
+            return (m100, s100), (m150, s150)
+        else:
+            return (m100, s100), None
+
+
+class FPN(nn.Module):
+    def __init__(self, out_channels=2, d=128):
         super().__init__()
 
-        self.in_channels = in_channels
         self.out_channels = out_channels
-
-        # self.net = nn.Sequential(
-        #     nn.Conv2d(in_channels, 512, 5, padding=2),
-        #     nn.ConvTranspose2d(512, out_channels, 14, stride=4, padding=0),
-        # )
-        self.bn = nn.BatchNorm2d(in_channels)
-        self.small_net = nn.Sequential(
-            nn.Conv2d(in_channels, 512, 5, padding=2),
-            nn.ConvTranspose2d(512, out_channels, 15, stride=3, padding=6),
-        )
-        self.large_net = nn.Sequential(
-            nn.Conv2d(in_channels, 512, 7, padding=3),
-            nn.ConvTranspose2d(512, out_channels, 20, stride=4, padding=8),
-        )
-
-    def forward(self, x, out_shape):
-        x = self.bn(x)
-        x = F.relu(x)
-        l = self.large_net(x)
-        s = self.small_net(x)
-        s = F.upsample(s, out_shape, mode='bilinear')
-        l = F.upsample(l, out_shape, mode='bilinear')
-        return s + l
-
-
-class FPN(ResNet):
-    def __init__(self, out_channels=2, d=128, pretrained=True):
-        super().__init__(Bottleneck, [3, 4, 6, 3])
-
-        self.out_channels = out_channels
-
-        if pretrained:
-            self.load_state_dict(model_zoo.load_url(model_urls['resnet50']))
+        self.mask_pixel_sizes = (1, 1.5, 2, 3, 4, 6, 8)
+        self.mask_strides = (4, 4, 8, 8, 16, 16, 32)
+        self.resnet = resnet50(True)
 
         # Top layer
         self.toplayer = nn.Conv2d(2048, d, kernel_size=1, stride=1, padding=0)  # Reduce channels
@@ -58,14 +58,11 @@ class FPN(ResNet):
         self.latlayer2 = nn.Conv2d(512, d, kernel_size=1, stride=1, padding=0)
         self.latlayer3 = nn.Conv2d(256, d, kernel_size=1, stride=1, padding=0)
 
-        self.mask_mlp = MaskMLP(d, out_channels)
+        self.mask_mlp = MaskMLP(d)
 
     def freeze_pretrained_layers(self, freeze):
-        for p in self.parameters():
+        for p in self.resnet.parameters():
             p.requires_grad = not freeze
-        for module in (self.mask_mlp, self.latlayer1, self.latlayer1, self.latlayer1):
-            for p in module.parameters():
-                p.requires_grad = True
 
     def _upsample_add(self, x, y):
         '''Upsample and add two feature maps.
@@ -86,16 +83,16 @@ class FPN(ResNet):
         _, _, H, W = y.size()
         return F.upsample(x, size=(H, W), mode='bilinear') + y
 
-    def forward(self, x):
-        c1 = self.conv1(x)
-        c1 = self.bn1(c1)
-        c1 = self.relu(c1)
-        c1 = self.maxpool(c1)
+    def forward(self, x, output_unpadding=0):
+        c1 = self.resnet.conv1(x)
+        c1 = self.resnet.bn1(c1)
+        c1 = self.resnet.relu(c1)
+        c1 = self.resnet.maxpool(c1)
 
-        c2 = self.layer1(c1)
-        c3 = self.layer2(c2)
-        c4 = self.layer3(c3)
-        c5 = self.layer4(c4)
+        c2 = self.resnet.layer1(c1)
+        c3 = self.resnet.layer2(c2)
+        c4 = self.resnet.layer3(c3)
+        c5 = self.resnet.layer4(c4)
 
         # Top-down
         p5 = self.toplayer(c5)
@@ -107,11 +104,15 @@ class FPN(ResNet):
         # p3 = self.smooth2(p3)
         # p2 = self.smooth3(p2)
 
-        m5 = self.mask_mlp(p5, x.shape[2:])
-        m4 = self.mask_mlp(p4, x.shape[2:])
-        m3 = self.mask_mlp(p3, x.shape[2:])
-        m2 = self.mask_mlp(p2, x.shape[2:])
+        if output_unpadding != 0:
+            assert output_unpadding % 32 == 0
+            ou = output_unpadding
+            p5, p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
+                              ((p5, ou // 32), (p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
 
-        ms = m2.add_(m3).add_(m4).add_(m5)
+        m5_100, _ = self.mask_mlp(p5, False)
+        m4_100, m4_150 = self.mask_mlp(p4, True)
+        m3_100, m3_150 = self.mask_mlp(p3, True)
+        m2_100, m2_150 = self.mask_mlp(p2, True)
 
-        return ms
+        return m2_100, m2_150, m3_100, m3_150, m4_100, m4_150, m5_100

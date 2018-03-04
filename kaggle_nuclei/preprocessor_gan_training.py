@@ -12,7 +12,7 @@ from torch.autograd import Variable
 from tqdm import tqdm
 from torch import nn
 
-from .dataset import make_train_dataset
+from .dataset import NucleiDataset
 from .feature_pyramid_network import FPN
 from .iou import threshold_iou, iou
 from .losses import dice_loss, soft_dice_loss, clipped_mse_loss
@@ -22,8 +22,8 @@ from torch.nn.modules.conv import _ConvNd
 from torch.nn.modules.batchnorm import _BatchNorm
 
 
-def train_preprocessor_gan(train_data, epochs=15, pretrain_epochs=7, affine_augmentation=False, resnet=False):
-    dataset = make_train_dataset(train_data, affine=affine_augmentation, supersample=1)
+def train_preprocessor_gan(train_data, epochs=15, pretrain_epochs=7, resnet=False):
+    dataset = NucleiDataset(train_data, supersample=1)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=4, pin_memory=True)
 
     pad = dataloader.dataset.padding
@@ -35,18 +35,18 @@ def train_preprocessor_gan(train_data, epochs=15, pretrain_epochs=7, affine_augm
     #                           weight_decay=5e-4, avg_sq_mode='tensor', amsgrad=False)
     # else:
     gen_model = UNet(3, 3).cuda()
-    gen_optimizer = GAdam(get_param_groups(gen_model), lr=5e-5, betas=(0.5, 0.999),
-                          amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=True)
+    gen_optimizer = GAdam(get_param_groups(gen_model), lr=1e-4, betas=(0.5, 0.999),
+                          amsgrad=False, nesterov=0.5, weight_decay=1e-5, norm_weight_decay=False)
 
-    disc_model = GanD_UNet(6).cuda()
-    disc_optimizer = GAdam(get_param_groups(disc_model), lr=5e-5, betas=(0.5, 0.999),
-                           amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=True)
+    disc_model = GanD(6).cuda()
+    disc_optimizer = GAdam(get_param_groups(disc_model), lr=1e-4, betas=(0.5, 0.999),
+                           amsgrad=False, nesterov=0.5, weight_decay=1e-5, norm_weight_decay=False)
 
-    # gen_model.apply(weights_init)
-    # disc_model.apply(weights_init)
+    gen_model.apply(weights_init)
+    disc_model.apply(weights_init)
 
-    # gen_scheduler = CosineAnnealingRestartLR(gen_optimizer, len(dataloader), 2)
-    # disc_scheduler = CosineAnnealingRestartLR(disc_optimizer, len(dataloader), 2)
+    gen_scheduler = CosineAnnealingRestartLR(gen_optimizer, len(dataloader), 2)
+    disc_scheduler = CosineAnnealingRestartLR(disc_optimizer, len(dataloader), 2)
 
     best_model = gen_model
     best_score = -math.inf
@@ -61,13 +61,13 @@ def train_preprocessor_gan(train_data, epochs=15, pretrain_epochs=7, affine_augm
             if resnet:
                 gen_model.freeze_pretrained_layers(epoch < pretrain_epochs)
             t_iou_ma, f_iou_ma, sdf_loss_ma, cont_loss_ma = 0, 0, 0, 0
-            for i, (img, mask, sdf) in enumerate(pbar):
+            for i, (img, mask, sdf, obj_info) in enumerate(pbar):
                 x_train = Variable(img.cuda())
                 sdf_train = Variable(sdf.cuda())
                 mask_train = mask.cuda()
                 x_train_unpad = x_train[:, :, pad:-pad, pad:-pad]
 
-                # mask_train = remove_missized_objects(mask_train, 0.05, 0.7)
+                # mask_train = remove_missized_objects(mask_train, 0.1, 0.6)
                 mask_target = (mask_train > 0).float().clamp(min=0.05, max=0.95)
                 mask_target = Variable(mask_target)
 
@@ -122,21 +122,21 @@ def train_preprocessor_gan(train_data, epochs=15, pretrain_epochs=7, affine_augm
                 gen_d, fake_features = disc_model(fake_input)
                 loss_gen = 0
                 # loss_gen += -gen_d.mean()
-                loss_gen += F.binary_cross_entropy_with_logits(gen_d, one.expand_as(gen_d))
+                # loss_gen += F.binary_cross_entropy_with_logits(gen_d, one.expand_as(gen_d))
                 # loss_gen += 0.5 * (1 - gen_d.div(3).clamp(min=-1)).pow_(2).mean()
-                loss_gen += 0.1 * F.mse_loss(fake_features, real_features.detach())
+                loss_gen += F.mse_loss(fake_features, real_features.detach())
                 # loss_gen += F.mse_loss(gen_d, real_d.detach())
 
                 sdf_loss = F.mse_loss(out_sdf, sdf_train)
                 cont_loss = F.mse_loss(out_cont, cont_train)
                 # mask_loss = soft_dice_loss(out_mask, mask_target)
-                loss = loss_gen + 0.1 * sdf_loss + 0.1 * cont_loss # sdf_loss.mean() + cont_loss.mean() #+ mask_loss
+                loss = loss_gen + sdf_loss + cont_loss # sdf_loss.mean() + cont_loss.mean() #+ mask_loss
                 loss.backward()
 
                 gen_optimizer.step()
 
-                # gen_scheduler.step()
-                # disc_scheduler.step()
+                gen_scheduler.step()
+                disc_scheduler.step()
 
                 # flat_out_mask = (out_mask.max(1)[1] != out_mask.shape[1] - 1).float()
                 f_iou = iou(out_mask.data, mask_train)
@@ -170,7 +170,7 @@ def remove_missized_objects(mask, min_size, max_size):
 # custom weights initialization called on netG and netD
 def weights_init(m):
     if isinstance(m, _ConvNd) or isinstance(m, nn.Linear):
-        m.weight.data.normal_(0.0, 0.02)
+        # m.weight.data.normal_(0.0, 0.02)
         if m.bias is not None:
             m.bias.data.fill_(0)
     elif isinstance(m, _BatchNorm):
@@ -180,7 +180,6 @@ def weights_init(m):
 
 def split_labels(mask, num_split_channels):
     assert num_split_channels >= 2
-    assert mask.dim() == 4
     mask_label_count = mask.max()
     split_mask = mask.new(mask.shape[0], num_split_channels, *mask.shape[2:]).byte().fill_(0)
     if mask_label_count == 0:
@@ -240,7 +239,7 @@ class GanD_UNet(nn.Module):
         # output = features
         # while output.shape[2] >= self.conv.kernel_size[0]:
         #     output = self.conv(output)
-        output = features.view(input.shape[0], -1).mean(-1)
+        output = features.view(input.shape[0], -1).mean()
         # output = features.view(*features.shape[:2], -1)
         # output = torch.cat([output.mean(-1), output.std(-1)], 1)
         # output = self.head(output).view(-1)

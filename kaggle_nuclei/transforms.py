@@ -33,13 +33,18 @@ class Pad:
         return F.pad(x, pad=self.size, mode=self.mode).data
 
 
-class AffineCrop:
-    def __init__(self, size, padding=0, rotation=(0, 0), scale=(1, 1), pad_mode='constant'):
+class RandomAffineCrop:
+    def __init__(self, size, padding=0, rotation=(0, 0), scale=(1, 1),
+                 horizontal_flip=False, vertical_flip=False, pad_mode='constant',
+                 callback=None):
         self.size = size
         self.padding = padding
         self.rotation = rotation
         self.scale = scale
         self.pad_mode = pad_mode
+        self.horizontal_flip = horizontal_flip
+        self.vertical_flip = vertical_flip
+        self.callback = callback # (result, pixel_transform(y, x)) -> None or array
 
     def __call__(self, input):
         x = input.cpu().numpy()
@@ -49,11 +54,13 @@ class AffineCrop:
 
         rotation = math.radians(random.uniform(self.rotation[0], self.rotation[1]))
         scale = math.exp(random.uniform(math.log(self.scale[0]), math.log(self.scale[1])))
+        hflip = self.horizontal_flip and random.random() > 0.5
+        vflip = self.vertical_flip and random.random() > 0.5
         rot_padded_size = np.abs(self.rotate_vec_2d(self.size, self.size, rotation)).max()
         # FIXME: 1.05 will fix corners, too lazy for math
         if abs(rotation) > 1:
             rot_padded_size *= 1.05
-        rot_padded_scaled_size = math.ceil(rot_padded_size / scale)
+        rot_padded_scaled_size = math.ceil(rot_padded_size * scale)
         rot_padded_size = math.ceil(rot_padded_size)
 
         rot_pad = round((rot_padded_size - self.size) / 2)
@@ -63,17 +70,24 @@ class AffineCrop:
 
         crop_rect = (crop_y, crop_x, rot_padded_scaled_size, rot_padded_scaled_size)
         x = self.padded_crop(x, crop_rect, self.pad_mode)
-        x = self.affine_transform(x, scale, rotation, (rot_padded_size, rot_padded_size, x.shape[2]))
+        x, transf = self.affine_transform(x, scale, rotation, hflip, vflip,
+                                          (rot_padded_size, rot_padded_size, x.shape[2]))
         x = x[rot_pad: rot_pad + self.size, rot_pad: rot_pad + self.size]
+
+        if self.callback is not None:
+            v = self.callback(x, crop_y, crop_x, rotation, scale, hflip, vflip, transf)
+            if v is not None:
+                x = v
 
         x = x.transpose((2, 0, 1))
         if input.dim() == 2:
             x = x.squeeze(0)
         x = torch.from_numpy(x).type_as(input)
+
         return x
 
     @staticmethod
-    def affine_transform(x, scale, rot, out_shape):
+    def affine_transform(x, scale, rot, hflip, vflip, out_shape):
         c_in = 0.5 * np.array(x.shape)
         c_out = 0.5 * np.array(out_shape)
 
@@ -81,24 +95,29 @@ class AffineCrop:
             [math.cos(rot), math.sin(rot), 0],
             [-math.sin(rot), math.cos(rot), 0],
             [0, 0, 1]
-        ])
+        ], dtype=np.float32)
         scale_transform = np.array([
-            [1 / scale, 0, 0],
-            [0, 1 / scale, 0],
+            [scale, 0, 0],
+            [0, scale, 0],
             [0, 0, 1]
-        ])
-        transform = scale_transform @ rot_transform
+        ], dtype=np.float32)
+        flip_transform = np.array([
+            [-1 if hflip else 1, 0, 0],
+            [0, -1 if vflip else 1, 0],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        transform = flip_transform @ rot_transform @ scale_transform
         offset = c_in - c_out @ transform.T
         offset[2] = 0
 
         dst = scipy.ndimage.interpolation.affine_transform(
             x,
             transform,
-            order=1,
+            order=0,
             offset=offset,
             output_shape=out_shape,
         )
-        return dst
+        return dst, transform
 
     @staticmethod
     def padded_crop(x, rect, pad_mode='constant'):

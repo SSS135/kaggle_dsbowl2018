@@ -4,9 +4,8 @@ import numpy as np
 import skfmm
 
 
-def distance_field(data, clip=(-1, 1)):
-    masks = data.cpu().numpy()
-    maxdist = np.full(masks.shape, -np.inf)
+def distance_field(masks, clip=(-1, 1)):
+    maxdist = np.full(masks.shape, -np.inf, dtype=np.float32)
     dists = []
     for layer in count():
         mask = masks == (layer + 1)

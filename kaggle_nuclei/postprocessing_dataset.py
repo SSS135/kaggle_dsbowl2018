@@ -10,18 +10,18 @@ from torch.utils.data import Dataset
 
 from .dataset import pad, size
 from .dataset import resnet_norm_mean, resnet_norm_std
-from .transforms import RandomCrop, Pad, AffineCrop
+from .transforms import RandomCrop, Pad, RandomAffineCrop
 
 
 class PostprocessingDataset(Dataset):
     def __init__(self, data, preds):
         self.photo_transform = tsf.Compose([
-            AffineCrop(size + pad * 2, padding=size // 2, rotation=(-180, 180), scale=(0.25, 4), pad_mode='reflect'),
+            RandomAffineCrop(size + pad * 2, padding=size // 2, rotation=(-180, 180), scale=(0.25, 4), pad_mode='reflect'),
             tst.RandomFlip(True, True),
             tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
         ])
         self.mask_transform = tsf.Compose([
-            AffineCrop(size + pad * 2, padding=size // 2, rotation=(-180, 180), scale=(0.25, 4), pad_mode='reflect'),
+            RandomAffineCrop(size + pad * 2, padding=size // 2, rotation=(-180, 180), scale=(0.25, 4), pad_mode='reflect'),
             tst.RandomFlip(True, True),
         ])
         self.padding = pad

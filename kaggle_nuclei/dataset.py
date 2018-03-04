@@ -5,7 +5,7 @@ import random
 import sys
 import numpy as np
 import torchsample.transforms as tst
-from .transforms import RandomCrop, Pad, AffineCrop
+from .transforms import RandomCrop, Pad, RandomAffineCrop
 import random
 import sys
 
@@ -27,24 +27,40 @@ bad_ids = {
 }
 
 
-size = 64
+size = 128
 pad = 32
-resnet_norm_mean = [0.485, 0.456, 0.406]
-resnet_norm_std = [0.229, 0.224, 0.225]
+resnet_norm_mean = [0.5, 0.5, 0.5]
+resnet_norm_std = [0.5, 0.5, 0.5]
 
 
 class NucleiDataset(Dataset):
-    def __init__(self, data, source_transform, target_transform, supersample=1):
-        self.has_mask = 'mask' in data[0]
-        self.source_transform = source_transform
-        self.target_transform = target_transform
+    def __init__(self, data, supersample=1):
+        self.has_mask = 'mask_compressed' in data[0]
         self.padding = pad
         self.supersample = supersample
         self.supersample_indexes = None
+        self._transforming_object_size = False
+
         if self.has_mask:
             self.datas = [d for d in data if d['name'] not in bad_ids]
         else:
             self.datas = data
+
+        self.source_transform = tsf.Compose([
+            RandomAffineCrop(size + pad * 2, padding=pad, rotation=(-180, 180), scale=(0.5, 2),
+                             horizontal_flip=True, vertical_flip=True, pad_mode='reflect'),
+            tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
+        ])
+        self.target_transform = tsf.Compose([
+            RandomAffineCrop(size + pad * 2, padding=pad, rotation=(-180, 180), scale=(0.5, 2),
+                             horizontal_flip=True, vertical_flip=True, pad_mode='reflect',
+                             callback=self.target_transform_callback),
+        ])
+
+    def target_transform_callback(self, arr, crop_y, crop_x, rotation, scale, hflip, vflip, affine_matrix):
+        if not self._transforming_object_size:
+            return
+        arr *= scale
 
     def __getitem__(self, index):
         if self.supersample != 1:
@@ -63,40 +79,28 @@ class NucleiDataset(Dataset):
 
         if self.has_mask:
             pad = self.padding
-            mask = data['mask'].float().unsqueeze(0)
-            sdf = data['distance_field'].unsqueeze(0)
+            mask = data['mask_compressed'].float().unsqueeze(0)
+            sdf = data['sdf_compressed'].float().div(127.5).sub(1).unsqueeze(0)
+            obj_size = data['info_mask'][2:].float()
 
             torch.manual_seed(tseed)
             random.setstate(rstate)
             mask = self.target_transform(mask).round().long()
+
             torch.manual_seed(tseed)
             random.setstate(rstate)
             sdf = self.target_transform(sdf)
-            return img, mask[:, pad:-pad, pad:-pad], sdf[:, pad:-pad, pad:-pad]
+
+            torch.manual_seed(tseed)
+            random.setstate(rstate)
+            self._transforming_object_size = True
+            obj_size = self.target_transform(obj_size)
+            self._transforming_object_size = False
+
+            unpad = (slice(None), slice(pad, -pad), slice(pad, -pad))
+            return img, mask[unpad], sdf[unpad], obj_size[unpad]
         else:
             return img
 
     def __len__(self):
         return len(self.datas) * self.supersample
-
-
-def make_train_dataset(train_data, affine=False, supersample=1):
-    s_transf = tsf.Compose([
-        AffineCrop(size + pad * 2, padding=size // 2, rotation=(-180, 180), scale=(0.25, 4), pad_mode='reflect'),
-        tst.RandomFlip(True, True),
-        tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
-    ])
-    t_transf = tsf.Compose([
-        AffineCrop(size + pad * 2, padding=size // 2, rotation=(-180, 180), scale=(0.25, 4), pad_mode='reflect'),
-        tst.RandomFlip(True, True),
-    ])
-    return NucleiDataset(train_data, s_transf, t_transf, supersample=supersample)
-
-
-# def make_test_dataset(test_data):
-#     s_transf = tsf.Compose([
-#         MeanNormalize(),
-#         Pad(2 * (pad,), mode='reflect'),
-#         RandomCrop(2 * (size + pad * 2,)),
-#     ])
-#     return NucleiDataset(test_data, s_transf, None)
