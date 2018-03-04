@@ -26,7 +26,7 @@ from .dataset import resnet_norm_mean, resnet_norm_std
 from .postprocessing_dataset import PostprocessingDataset
 from optfn.gadam import GAdam
 import gym.spaces
-from functools import partial
+from functools import partial, reduce
 from .unet_actor import UNetActorCritic
 from skimage.morphology import label
 from optfn.snes import SNES
@@ -41,15 +41,13 @@ except:
 
 
 def train_postprocessor_ppo(train_data, train_pred, epochs=7):
-    num_actors = 4
-
     dataset = PostprocessingDataset(train_data, train_pred)
     dataloader = torch.utils.data.DataLoader(
-        dataset, shuffle=True, batch_size=num_actors, pin_memory=True, drop_last=True)
+        dataset, shuffle=True, batch_size=4, pin_memory=True, drop_last=True)
 
-    gen_model = UNet(6, 1).cuda()
+    gen_model = UNet(6, 2).cuda()
     gen_optimizer = GAdam(get_param_groups(gen_model), lr=1e-4, betas=(0.5, 0.999), avg_sq_mode='tensor', weight_decay=5e-5)
-    disc_model = GanD_UNet(7).cuda()
+    disc_model = GanD_UNet(8).cuda()
     disc_optimizer = GAdam(get_param_groups(disc_model), lr=1e-4, betas=(0.5, 0.999), avg_sq_mode='tensor', weight_decay=5e-5)
 
     gen_scheduler = CosineAnnealingRestartLR(gen_optimizer, len(dataloader), 2)
@@ -66,7 +64,7 @@ def train_postprocessor_ppo(train_data, train_pred, epochs=7):
                 pred_unpad_mask = pred_mask[:, :, pad:-pad, pad:-pad]
                 img, pred_mask, pred_sdf, pred_cont = [Variable(x) for x in (img, pred_mask, pred_sdf, pred_cont)]
 
-                # real
+                # disc
                 disc_optimizer.zero_grad()
 
                 gen_in = torch.cat([img, pred_mask - 0.5, pred_sdf, pred_cont], 1)
@@ -75,24 +73,18 @@ def train_postprocessor_ppo(train_data, train_pred, epochs=7):
                 src_iou = iou(pred_unpad_mask, mask)
                 src_obj_iou = object_iou(pred_unpad_mask, mask)
 
-                # disc_in = torch.cat([gen_in_unpad, Variable(pred_unpad_mask - 0.5)], 1)
-                # disc_out, _ = disc_model(disc_in.detach())
-                # real_disc_loss = F.mse_loss(disc_out, Variable(src_iou))
-                # real_disc_loss.backward()
-
-                # fake
-
                 gen_out = gen_model(gen_in)
-                gen_out = F.tanh(gen_out)
+                gen_out = F.softmax(gen_out, 1)
                 gen_out_unpad = gen_out[:, :, pad:-pad, pad:-pad]
-                gen_mask_unpad = gen_out_unpad.data + pred_unpad_mask
+                # gen_mask_unpad = gen_out_unpad[:, 1:].data # gen_out_unpad.data + pred_unpad_mask
 
-                aug_iou = iou(gen_mask_unpad, mask)
-                aug_obj_iou = object_iou(gen_mask_unpad, mask)
+                gm_max = gen_out_unpad.data.max(1, keepdim=True)[1]
+                aug_iou = iou((gm_max != 0).float(), mask)
+                aug_obj_iou = multilayer_object_iou(gen_out_unpad.data, mask)
 
-                disc_in = torch.cat([gen_in_unpad, gen_out_unpad], 1)
+                disc_in = torch.cat([gen_in_unpad, gen_out_unpad - 1 / gen_out_unpad.shape[1]], 1)
                 disc_out, _ = disc_model(disc_in.detach())
-                fake_disc_loss = F.mse_loss(disc_out, Variable(aug_obj_iou + aug_iou))
+                fake_disc_loss = F.mse_loss(disc_out, Variable(aug_iou + aug_obj_iou))
                 fake_disc_loss.backward()
                 disc_optimizer.step()
 
@@ -248,6 +240,33 @@ def object_iou(pred_mask, target_mask, threshold=0.5):
     tmask = target_mask.cpu().numpy().squeeze(1)
     aug_ious = [mean_threshold_object_iou(label(pm > threshold), tm) for pm, tm in zip(pmask, tmask)]
     return torch.Tensor(aug_ious).type_as(pred_mask)
+
+
+def multilayer_object_iou(pred_mask_layer_probs, target_labels):
+    tlabels = target_labels.cpu().numpy().squeeze(1)
+    max_softmax_indices = pred_mask_layer_probs.max(1)[1].cpu().numpy()
+
+    ious = []
+    for (softmax_indexes_sample, target_labels_sample) in zip(max_softmax_indices, tlabels):
+        softmax_labels = softmax_to_labels(softmax_indexes_sample, pred_mask_layer_probs.shape[1])
+        mt_iou = mean_threshold_object_iou(softmax_labels, target_labels_sample)
+        ious.append(mt_iou)
+
+    return torch.Tensor(ious).type_as(pred_mask_layer_probs)
+
+
+def softmax_to_labels(max_softmax_indices, softmax_size):
+    label_layers = [label(max_softmax_indices == i) for i in range(1, softmax_size)]
+    pmask = np.zeros_like(label_layers[0], dtype=np.int64)
+    last_idx = 0
+    for layer_label in label_layers:
+        layer_count = layer_label.max()
+        layer_label = layer_label.copy()
+        layer_label[layer_label != 0] += last_idx
+        assert not pmask[layer_label != 0].any()
+        pmask += layer_label
+        last_idx += layer_count
+    return pmask
 
 
 # def full_image_iou(pred_mask, mask):
