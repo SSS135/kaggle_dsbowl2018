@@ -34,7 +34,7 @@ class Pad:
 
 
 class RandomAffineCrop:
-    def __init__(self, size, padding=0, rotation=(0, 0), scale=(1, 1),
+    def __init__(self, size, padding=0, rotation={(0, 0)}, scale=(1, 1),
                  horizontal_flip=False, vertical_flip=False, pad_mode='constant',
                  callback=None):
         self.size = size
@@ -52,7 +52,10 @@ class RandomAffineCrop:
             x = np.expand_dims(x, 0)
         x = x.transpose((1, 2, 0))
 
-        rotation = math.radians(random.uniform(self.rotation[0], self.rotation[1]))
+        rotation = random.choice(tuple(self.rotation))
+        if not isinstance(rotation, list) and not isinstance(rotation, tuple):
+            rotation = (rotation, rotation)
+        rotation = math.radians(random.uniform(rotation[0], rotation[1]))
         scale = math.exp(random.uniform(math.log(self.scale[0]), math.log(self.scale[1])))
         hflip = self.horizontal_flip and random.random() > 0.5
         vflip = self.vertical_flip and random.random() > 0.5

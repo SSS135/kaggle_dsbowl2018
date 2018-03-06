@@ -8,7 +8,7 @@ import torch.utils.data
 from optfn.cosine_annealing import CosineAnnealingRestartLR
 from optfn.gadam import GAdam
 from optfn.param_groups_getter import get_param_groups
-from sklearn.metrics import precision_recall_fscore_support
+from sklearn.metrics import matthews_corrcoef, precision_recall_fscore_support
 from torch.autograd import Variable
 from tqdm import tqdm
 from torch import nn
@@ -23,6 +23,10 @@ import numpy as np
 import numpy.random as rng
 
 
+def matthews_corrcoef_checked(pred, target, default):
+    return matthews_corrcoef(pred, target) if pred.sum() != 0 and target.sum() != 0 else default
+
+
 def binary_focal_loss_with_logits(pred, target, lam=2, reduce=True):
     pred = F.sigmoid(pred)
     p = pred * target + (1 - pred) * (1 - target)
@@ -35,7 +39,7 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7):
 
     dataset = NucleiDataset(train_data, supersample=1)
     dataloader = torch.utils.data.DataLoader(
-        dataset, shuffle=True, batch_size=4, pin_memory=True)
+        dataset, shuffle=True, batch_size=1, pin_memory=True)
 
     model = FPN(3).cuda()
     optimizer = GAdam(get_param_groups(model), lr=0.0001, nesterov=0.0, weight_decay=5e-4,
@@ -51,7 +55,8 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7):
     for epoch in range(epochs):
         with tqdm(dataloader) as pbar:
             model.freeze_pretrained_layers(epoch < pretrain_epochs)
-            mask_fscore_ma, score_fscore_ma = 0, 0
+            mask_fscore_ma, score_fscore_ma, mask_matthews_ma, score_matthews_ma = 0, 0, 0, 0
+
             for i, data in enumerate(pbar):
                 img, labels, sdf, obj_sizes = [x.cuda() for x in data]
                 x_train = torch.autograd.Variable(img)
@@ -88,15 +93,20 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7):
                 pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
                 target_score_np = target_scores.data.byte().cpu().numpy().reshape(-1)
 
-                mask_precision, mask_recall, mask_fscore, _ = precision_recall_fscore_support(
+                mask_matthews = matthews_corrcoef_checked(pred_mask_np, target_mask_np, mask_fscore_ma)
+                score_matthews = matthews_corrcoef_checked(pred_score_np, target_score_np, score_fscore_ma)
+                _, _, mask_fscore, _ = precision_recall_fscore_support(
                     pred_mask_np, target_mask_np, average='binary', warn_for=[])
-                score_precision, score_recall, score_fscore, _ = precision_recall_fscore_support(
+                _, _, score_fscore, _ = precision_recall_fscore_support(
                     pred_score_np, target_score_np, average='binary', warn_for=[])
 
                 bc = 1 - 0.99 ** (i + 1)
                 mask_fscore_ma = 0.99 * mask_fscore_ma + 0.01 * mask_fscore
                 score_fscore_ma = 0.99 * score_fscore_ma + 0.01 * score_fscore
-                pbar.set_postfix(E=epoch, MF=mask_fscore_ma / bc, SF=score_fscore_ma / bc, refresh=False)
+                mask_matthews_ma = 0.99 * mask_matthews_ma + 0.01 * mask_matthews
+                score_matthews_ma = 0.99 * score_matthews_ma + 0.01 * score_matthews
+                pbar.set_postfix(E=epoch, MF=mask_fscore_ma / bc, SF=score_fscore_ma / bc,
+                                 MM=mask_matthews_ma / bc, SM=score_matthews_ma / bc, refresh=False)
 
             score = mask_fscore_ma
             if mask_fscore_ma > best_score:

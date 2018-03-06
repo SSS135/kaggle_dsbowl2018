@@ -7,12 +7,18 @@ import torch
 
 
 class MaskMLP(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, f=256):
         super().__init__()
         self.in_channels = in_channels
         self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 512, FPN.mask_kernel_size),
-            nn.Conv2d(512, FPN.mask_size * FPN.mask_size + 1, 1),
+            nn.Conv2d(in_channels, f, 3, 1, 1),
+            nn.BatchNorm2d(f),
+            nn.ReLU(),
+            nn.Conv2d(f, f, 3, 1, 1),
+            nn.BatchNorm2d(f),
+            nn.ReLU(),
+            nn.Conv2d(f, f, FPN.mask_kernel_size),
+            nn.Conv2d(f, FPN.mask_size * FPN.mask_size + 1, 1),
         )
 
     def forward(self, input):

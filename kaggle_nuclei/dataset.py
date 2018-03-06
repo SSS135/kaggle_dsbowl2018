@@ -46,15 +46,16 @@ class NucleiDataset(Dataset):
         else:
             self.datas = data
 
+        crop_conf = dict(
+            size=train_size + train_pad * 2, padding=0, rotation={0, 90, 180, 270},
+            scale=(0.5, 2), horizontal_flip=True, vertical_flip=True)
+
         self.source_transform = tsf.Compose([
-            RandomAffineCrop(train_size + train_pad * 2, padding=0, rotation=(0, 0), scale=(1, 1),
-                             horizontal_flip=True, vertical_flip=True, pad_mode='constant'),
+            RandomAffineCrop(pad_mode='constant', **crop_conf),
             tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
         ])
         self.target_transform = tsf.Compose([
-            RandomAffineCrop(train_size + train_pad * 2, padding=0, rotation=(0, 0), scale=(1, 1),
-                             horizontal_flip=True, vertical_flip=True, pad_mode='constant',
-                             callback=self.target_transform_callback),
+            RandomAffineCrop(pad_mode='constant', callback=self.target_transform_callback, **crop_conf),
         ])
 
     def target_transform_callback(self, arr, crop_y, crop_x, rotation, scale, hflip, vflip, affine_matrix):
