@@ -8,7 +8,7 @@ from functools import reduce
 from skimage.transform import resize
 from torch.autograd import Variable
 from tqdm import tqdm
-from .dataset import resnet_norm_mean, resnet_norm_std, pad
+from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
 
 
 mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
@@ -44,7 +44,7 @@ def predict(model, raw_data, max_scale=4, tested_scales=15):
 def predict_single(model, img, scale=1, flip_type: 0 or 1 or 2 or 3=0):
     div = 32
     img = img.numpy().transpose(1, 2, 0)
-    s_shape = (np.array(img.shape) * scale / div).round().astype(int) * div + pad * 2
+    s_shape = (np.array(img.shape) * scale / div).round().astype(int) * div + train_pad * 2
     if np.max(s_shape) > 2048:
         # print(f'ignoring scale {scale}, size {tuple(s_shape)}, '
         #       f'source size {tuple(img.shape)} for {data["name"][:16]}')
@@ -55,12 +55,12 @@ def predict_single(model, img, scale=1, flip_type: 0 or 1 or 2 or 3=0):
     x = torch.from_numpy(x).unsqueeze(0).cuda()
     x = (x - mean_std_sub[0].view(1, -1, 1, 1)) / mean_std_sub[1].view(1, -1, 1, 1)
     x = flips[flip_type](x)
-    x = F.pad(x, 4 * (pad,), mode='reflect').data
+    x = F.pad(x, 4 * (train_pad,), mode='reflect').data
     # noise = x.new(1, 1, *x.shape[2:]).normal_(0, 1)
     # x = torch.cat([x, noise], 1)
     x = model(Variable(x, volatile=True)).data
     x = flips[flip_type](x).cpu()
-    x = x[0, :, pad:-pad, pad:-pad]
+    x = x[0, :, train_pad:-train_pad, train_pad:-train_pad]
     x = x.cpu().numpy()
     x = np.stack([scipy.misc.imresize(o, img.shape[:2], mode='F') for o in x], 2)
     return x

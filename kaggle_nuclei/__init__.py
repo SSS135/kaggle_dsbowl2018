@@ -8,3 +8,4 @@ from .feature_pyramid_network import FPN
 from .preprocessor_training import train_preprocessor
 from .postprocessor_training import train_postprocessor_ppo
 from .preprocessor_gan_training import train_preprocessor_gan
+from .preprocessor_rpn_training import train_preprocessor_rpn

@@ -10,39 +10,29 @@ class MaskMLP(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
         self.in_channels = in_channels
-        self.net100 = nn.Sequential(
-            nn.Conv2d(in_channels, 512, 4),
-            nn.Conv2d(512, 16 * 16 + 1, 1),
-        )
-        self.net150 = nn.Sequential(
-            nn.Conv2d(in_channels, 512, 6),
-            nn.Conv2d(512, 16 * 16 + 1, 1),
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 512, FPN.mask_kernel_size),
+            nn.Conv2d(512, FPN.mask_size * FPN.mask_size + 1, 1),
         )
 
-    def reshape(self, x):
-        mask, score = x.split(16 * 16, 1)
-        mask, score = mask.contiguous(), score.contiguous()
-        mask = mask.view(mask.shape[0], 1, *mask.shape[2:], 16, 16)
+    def forward(self, input):
+        x = self.net(input)
+        mask, score = x.split(FPN.mask_size * FPN.mask_size, 1)
+        mask, score = mask, score.contiguous()
+        mask = mask.permute(0, 2, 3, 1)
+        mask = mask.contiguous().view(mask.shape[0], 1, *mask.shape[1:3], FPN.mask_size, FPN.mask_size)
         return mask, score
-
-    def forward(self, input, include_large_scale):
-        x100 = self.net100(input)
-        m100, s100 = self.reshape(x100)
-        if include_large_scale:
-            x150 = self.net150(input)
-            m150, s150 = self.reshape(x150)
-            return (m100, s100), (m150, s150)
-        else:
-            return (m100, s100), None
 
 
 class FPN(nn.Module):
-    def __init__(self, out_channels=2, d=128):
+    mask_size = 16
+    mask_kernel_size = 4
+
+    def __init__(self, d=128):
         super().__init__()
 
-        self.out_channels = out_channels
-        self.mask_pixel_sizes = (1, 1.5, 2, 3, 4, 6, 8)
-        self.mask_strides = (4, 4, 8, 8, 16, 16, 32)
+        self.mask_pixel_sizes = (1, 2, 4, 8)
+        self.mask_strides = (4, 8, 16, 32)
         self.resnet = resnet50(True)
 
         # Top layer
@@ -110,9 +100,9 @@ class FPN(nn.Module):
             p5, p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
                               ((p5, ou // 32), (p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
 
-        m5_100, _ = self.mask_mlp(p5, False)
-        m4_100, m4_150 = self.mask_mlp(p4, True)
-        m3_100, m3_150 = self.mask_mlp(p3, True)
-        m2_100, m2_150 = self.mask_mlp(p2, True)
+        m5 = self.mask_mlp(p5)
+        m4 = self.mask_mlp(p4)
+        m3 = self.mask_mlp(p3)
+        m2 = self.mask_mlp(p2)
 
-        return m2_100, m2_150, m3_100, m3_150, m4_100, m4_150, m5_100
+        return m2, m3, m4, m5

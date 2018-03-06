@@ -17,7 +17,7 @@ from tqdm import tqdm
 from scipy.ndimage import gaussian_filter
 
 from .dataset import NucleiDataset
-from .dataset import pad, size
+from .dataset import train_pad, train_size
 from .iou import mean_threshold_object_iou, iou, threshold_iou
 from .losses import dice_loss
 from .transforms import RandomCrop, Pad
@@ -61,21 +61,21 @@ def train_postprocessor_ppo(train_data, train_pred, epochs=7):
             for i, batch in enumerate(pbar):
                 img, pred_mask, pred_sdf, pred_cont, mask = [x.cuda() for x in batch]
                 pred_mask = torch.sigmoid(pred_mask)
-                pred_unpad_mask = pred_mask[:, :, pad:-pad, pad:-pad]
+                pred_unpad_mask = pred_mask[:, :, train_pad:-train_pad, train_pad:-train_pad]
                 img, pred_mask, pred_sdf, pred_cont = [Variable(x) for x in (img, pred_mask, pred_sdf, pred_cont)]
 
                 # disc
                 disc_optimizer.zero_grad()
 
                 gen_in = torch.cat([img, pred_mask - 0.5, pred_sdf, pred_cont], 1)
-                gen_in_unpad = gen_in[:, :, pad:-pad, pad:-pad]
+                gen_in_unpad = gen_in[:, :, train_pad:-train_pad, train_pad:-train_pad]
 
                 src_iou = iou(pred_unpad_mask, mask)
                 src_obj_iou = object_iou(pred_unpad_mask, mask)
 
                 gen_out = gen_model(gen_in)
                 gen_out = F.softmax(gen_out, 1)
-                gen_out_unpad = gen_out[:, :, pad:-pad, pad:-pad]
+                gen_out_unpad = gen_out[:, :, train_pad:-train_pad, train_pad:-train_pad]
                 # gen_mask_unpad = gen_out_unpad[:, 1:].data # gen_out_unpad.data + pred_unpad_mask
 
                 gm_max = gen_out_unpad.data.max(1, keepdim=True)[1]

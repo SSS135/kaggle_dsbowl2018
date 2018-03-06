@@ -15,7 +15,7 @@ from torch.autograd import Variable
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from .dataset import pad, size
+from .dataset import train_pad, train_size
 from .iou import threshold_iou, iou
 from .losses import dice_loss
 from .transforms import RandomCrop, Pad
@@ -23,7 +23,7 @@ from .unet import UNet
 from .dataset import resnet_norm_mean, resnet_norm_std
 from .postprocessing_dataset import PostprocessingDataset
 from optfn.gadam import GAdam
-from .dataset import pad, size
+from .dataset import train_pad, train_size
 from torch import nn
 
 try:
@@ -39,8 +39,8 @@ class UNetActorCritic(rl.models.Actor):
 
     def forward(self, input) -> rl.models.ActorOutput:
         bs = input.shape[0]
-        input = input.view(bs, 3, size + pad * 2, size + pad * 2)
-        x = self.unet(input)[:, :, pad:-pad, pad:-pad]
+        input = input.view(bs, 3, train_size + train_pad * 2, train_size + train_pad * 2)
+        x = self.unet(input)[:, :, train_pad:-train_pad, train_pad:-train_pad]
         values, mean, logstd = torch.unbind(x, 1)
         values = values * 0
         values = values.contiguous().view(bs, -1).mean(-1)
@@ -57,12 +57,12 @@ class SimpleCNNActor(rl.models.Actor):
 
     def forward(self, input) -> rl.models.ActorOutput:
         bs = input.shape[0]
-        input = input.view(bs, 3, size + pad * 2, size + pad * 2)
+        input = input.view(bs, 3, train_size + train_pad * 2, train_size + train_pad * 2)
 
         x = F.relu(self.conv1(input))
         x = F.relu(self.conv2(x))
         x = self.conv3(x)
-        x = x[:, :, pad:-pad, pad:-pad]
+        x = x[:, :, train_pad:-train_pad, train_pad:-train_pad]
 
         # x = x.contiguous().view(bs, 3, -1).mean(-1)
         # values = x[:, 0]

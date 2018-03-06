@@ -27,8 +27,8 @@ bad_ids = {
 }
 
 
-size = 128
-pad = 32
+train_size = 512
+train_pad = 32
 resnet_norm_mean = [0.5, 0.5, 0.5]
 resnet_norm_std = [0.5, 0.5, 0.5]
 
@@ -36,7 +36,7 @@ resnet_norm_std = [0.5, 0.5, 0.5]
 class NucleiDataset(Dataset):
     def __init__(self, data, supersample=1):
         self.has_mask = 'mask_compressed' in data[0]
-        self.padding = pad
+        self.padding = train_pad
         self.supersample = supersample
         self.supersample_indexes = None
         self._transforming_object_size = False
@@ -47,13 +47,13 @@ class NucleiDataset(Dataset):
             self.datas = data
 
         self.source_transform = tsf.Compose([
-            RandomAffineCrop(size + pad * 2, padding=pad, rotation=(-180, 180), scale=(0.5, 2),
-                             horizontal_flip=True, vertical_flip=True, pad_mode='reflect'),
+            RandomAffineCrop(train_size + train_pad * 2, padding=0, rotation=(0, 0), scale=(1, 1),
+                             horizontal_flip=True, vertical_flip=True, pad_mode='constant'),
             tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
         ])
         self.target_transform = tsf.Compose([
-            RandomAffineCrop(size + pad * 2, padding=pad, rotation=(-180, 180), scale=(0.5, 2),
-                             horizontal_flip=True, vertical_flip=True, pad_mode='reflect',
+            RandomAffineCrop(train_size + train_pad * 2, padding=0, rotation=(0, 0), scale=(1, 1),
+                             horizontal_flip=True, vertical_flip=True, pad_mode='constant',
                              callback=self.target_transform_callback),
         ])
 
