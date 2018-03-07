@@ -82,7 +82,7 @@ class NucleiDataset(Dataset):
             pad = self.padding
             mask = data['mask_compressed'].float().unsqueeze(0)
             sdf = data['sdf_compressed'].float().div(127.5).sub(1).unsqueeze(0)
-            obj_size = data['info_mask'][2:].float()
+            # obj_size = data['info_mask'][2:].float()
 
             torch.manual_seed(tseed)
             random.setstate(rstate)
@@ -92,14 +92,14 @@ class NucleiDataset(Dataset):
             random.setstate(rstate)
             sdf = self.target_transform(sdf)
 
-            torch.manual_seed(tseed)
-            random.setstate(rstate)
-            self._transforming_object_size = True
-            obj_size = self.target_transform(obj_size)
-            self._transforming_object_size = False
+            # torch.manual_seed(tseed)
+            # random.setstate(rstate)
+            # self._transforming_object_size = True
+            # obj_size = self.target_transform(obj_size)
+            # self._transforming_object_size = False
 
             unpad = (slice(None), slice(pad, -pad), slice(pad, -pad))
-            return img, mask[unpad], sdf[unpad], obj_size[unpad]
+            return img, mask[unpad], sdf[unpad] #, obj_size[unpad]
         else:
             return img
 

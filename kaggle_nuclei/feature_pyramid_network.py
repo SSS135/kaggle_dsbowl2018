@@ -7,18 +7,19 @@ import torch
 
 
 class MaskMLP(nn.Module):
-    def __init__(self, in_channels, f=256):
+    def __init__(self, in_channels, num_scores, nf=256):
         super().__init__()
         self.in_channels = in_channels
+        self.num_scores = num_scores
         self.net = nn.Sequential(
-            nn.Conv2d(in_channels, f, 3, 1, 1),
-            nn.BatchNorm2d(f),
+            nn.Conv2d(in_channels, nf, 3, 1, 1),
+            nn.BatchNorm2d(nf),
             nn.ReLU(),
-            nn.Conv2d(f, f, 3, 1, 1),
-            nn.BatchNorm2d(f),
+            nn.Conv2d(nf, nf, 3, 1, 1),
+            nn.BatchNorm2d(nf),
             nn.ReLU(),
-            nn.Conv2d(f, f, FPN.mask_kernel_size),
-            nn.Conv2d(f, FPN.mask_size * FPN.mask_size + 1, 1),
+            nn.Conv2d(nf, nf, FPN.mask_kernel_size),
+            nn.Conv2d(nf, FPN.mask_size * FPN.mask_size + num_scores, 1),
         )
 
     def forward(self, input):
@@ -34,7 +35,7 @@ class FPN(nn.Module):
     mask_size = 16
     mask_kernel_size = 4
 
-    def __init__(self, d=128):
+    def __init__(self, num_scores=1, num_filters=256):
         super().__init__()
 
         self.mask_pixel_sizes = (1, 2, 4, 8)
@@ -42,14 +43,14 @@ class FPN(nn.Module):
         self.resnet = resnet50(True)
 
         # Top layer
-        self.toplayer = nn.Conv2d(2048, d, kernel_size=1, stride=1, padding=0)  # Reduce channels
+        self.toplayer = nn.Conv2d(2048, num_filters, kernel_size=1, stride=1, padding=0)  # Reduce channels
 
         # Lateral layers
-        self.latlayer1 = nn.Conv2d(1024, d, kernel_size=1, stride=1, padding=0)
-        self.latlayer2 = nn.Conv2d(512, d, kernel_size=1, stride=1, padding=0)
-        self.latlayer3 = nn.Conv2d(256, d, kernel_size=1, stride=1, padding=0)
+        self.latlayer1 = nn.Conv2d(1024, num_filters, kernel_size=1, stride=1, padding=0)
+        self.latlayer2 = nn.Conv2d(512, num_filters, kernel_size=1, stride=1, padding=0)
+        self.latlayer3 = nn.Conv2d(256, num_filters, kernel_size=1, stride=1, padding=0)
 
-        self.mask_mlp = MaskMLP(d)
+        self.mask_mlp = MaskMLP(num_filters, num_scores)
 
     def freeze_pretrained_layers(self, freeze):
         for p in self.resnet.parameters():

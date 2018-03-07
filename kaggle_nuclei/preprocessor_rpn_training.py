@@ -23,10 +23,6 @@ import numpy as np
 import numpy.random as rng
 
 
-def matthews_corrcoef_checked(pred, target, default):
-    return matthews_corrcoef(pred, target) if pred.sum() != 0 and target.sum() != 0 else default
-
-
 def binary_focal_loss_with_logits(pred, target, lam=2, reduce=True):
     pred = F.sigmoid(pred)
     p = pred * target + (1 - pred) * (1 - target)
@@ -41,7 +37,8 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, model=None,
     dataloader = torch.utils.data.DataLoader(
         dataset, shuffle=True, batch_size=4, pin_memory=True)
 
-    model = FPN(3).cuda() if model is None else model.cuda()
+    model = FPN(1).cuda() if model is None else model.cuda()
+    # optimizer = torch.optim.SGD(get_param_groups(model), lr=0.05, momentum=0.9, weight_decay=5e-4)
     optimizer = GAdam(get_param_groups(model), lr=2e-4, nesterov=0.75, weight_decay=5e-4,
                       avg_sq_mode='tensor', amsgrad=False)
 
@@ -55,16 +52,16 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, model=None,
     for epoch in range(epochs):
         with tqdm(dataloader) as pbar:
             model.freeze_pretrained_layers(epoch < pretrain_epochs)
-            mask_fscore_ma, score_fscore_ma, mask_matthews_ma, score_matthews_ma = 0, 0, 0, 0
+            score_fscore_ma, t_iou_ma, f_iou_ma = 0, 0, 0
 
             for i, data in enumerate(pbar):
-                img, labels, sdf, obj_sizes = [x.cuda() for x in data]
+                img, labels, sdf = [x.cuda() for x in data]
                 x_train = torch.autograd.Variable(img)
 
                 optimizer.zero_grad()
                 model_out = model(x_train, pad)
                 train_pairs = get_train_pairs(
-                    labels, sdf, obj_sizes, model_out, model.mask_pixel_sizes, samples_per_image)
+                    labels, sdf, model_out, model.mask_pixel_sizes, samples_per_image)
 
                 if train_pairs is None:
                     continue
@@ -88,42 +85,37 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, model=None,
                 optimizer.step()
                 scheduler.step()
 
-                pred_mask_np = (pred_masks.data > 0).cpu().numpy().reshape(-1)
-                target_mask_np = target_masks.data.byte().cpu().numpy().reshape(-1)
                 pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
                 target_score_np = target_scores.data.byte().cpu().numpy().reshape(-1)
 
-                mask_matthews = matthews_corrcoef_checked(pred_mask_np, target_mask_np, mask_fscore_ma)
-                score_matthews = matthews_corrcoef_checked(pred_score_np, target_score_np, score_fscore_ma)
-                _, _, mask_fscore, _ = precision_recall_fscore_support(
-                    pred_mask_np, target_mask_np, average='binary', warn_for=[])
                 _, _, score_fscore, _ = precision_recall_fscore_support(
                     pred_score_np, target_score_np, average='binary', warn_for=[])
 
-                bc = 1 - 0.99 ** (i + 1)
-                mask_fscore_ma = 0.99 * mask_fscore_ma + 0.01 * mask_fscore
-                score_fscore_ma = 0.99 * score_fscore_ma + 0.01 * score_fscore
-                mask_matthews_ma = 0.99 * mask_matthews_ma + 0.01 * mask_matthews
-                score_matthews_ma = 0.99 * score_matthews_ma + 0.01 * score_matthews
-                pbar.set_postfix(E=epoch, MF=mask_fscore_ma / bc, SF=score_fscore_ma / bc,
-                                 MM=mask_matthews_ma / bc, SM=score_matthews_ma / bc, refresh=False)
+                f_iou = iou(pred_masks.data, target_masks.data, 0)
+                t_iou = threshold_iou(f_iou)
 
-            score = mask_fscore_ma
-            if mask_fscore_ma > best_score:
+                bc = 1 - 0.99 ** (i + 1)
+                score_fscore_ma = 0.99 * score_fscore_ma + 0.01 * score_fscore
+                f_iou_ma = 0.99 * f_iou_ma + 0.01 * f_iou.mean()
+                t_iou_ma = 0.99 * t_iou_ma + 0.01 * t_iou.mean()
+                pbar.set_postfix(E=epoch, SF=score_fscore_ma / bc, IoU=f_iou_ma / bc, IoU_T=t_iou_ma / bc, refresh=False)
+
+            score = t_iou_ma
+            if t_iou_ma > best_score:
                 best_score = score
                 best_model = copy.deepcopy(model)
     return best_model
 
 
 def get_train_pairs(
-        labels, sdf, obj_sizes, net_out, pixel_sizes, samples_count,
+        labels, sdf, net_out, pixel_sizes, samples_count,
         neg_to_pos_ratio=3, pos_sdf_threshold=0.6, neg_sdf_threshold=-0.3,
         pos_size_limits=(0.4, 0.75), neg_size_limits=(0.15, 1.5)):
     outputs = []
     for sample_idx in range(labels.shape[0]):
         net_out_sample = [(m[sample_idx, 0], s[sample_idx, 0]) for m, s in net_out]
         o = get_train_pairs_single(
-            labels[sample_idx, 0], sdf[sample_idx, 0], obj_sizes[sample_idx, 0], net_out_sample,
+            labels[sample_idx, 0], sdf[sample_idx, 0], net_out_sample,
             pixel_sizes, samples_count, neg_to_pos_ratio, pos_sdf_threshold, neg_sdf_threshold,
             pos_size_limits, neg_size_limits
         )
@@ -136,13 +128,14 @@ def get_train_pairs(
     return pred_masks.unsqueeze(1), target_masks.unsqueeze(1).float(), pred_scores, target_scores
 
 
-def get_train_pairs_single(labels, sdf, obj_sizes, net_out, pixel_sizes, samples_count,
+def get_train_pairs_single(labels, sdf, net_out, pixel_sizes, samples_count,
                            neg_to_pos_ratio, pos_sdf_threshold, neg_sdf_threshold,
                            pos_size_limits, neg_size_limits):
-    resampled_layers = resample_data(labels, sdf, obj_sizes, pixel_sizes)
+    box_mask = get_object_boxes(labels)
+    resampled_layers = resample_data(labels, sdf, box_mask, pixel_sizes)
     outputs = []
     for layer_idx, layer_data in enumerate(zip(net_out, resampled_layers)):
-        (out_masks, out_scores), (res_labels, res_sdf, res_sizes) = layer_data
+        (out_masks, out_scores), (res_labels, res_sdf, res_boxes) = layer_data
 
         num_samples_left = samples_count - len(outputs)
         num_layers_left = len(net_out) - layer_idx
@@ -150,7 +143,7 @@ def get_train_pairs_single(labels, sdf, obj_sizes, net_out, pixel_sizes, samples
         num_layer_pos_samples = math.ceil(num_layer_total_samples / (neg_to_pos_ratio + 1))
 
         o = generate_samples_for_layer(
-            out_masks, out_scores, res_labels, res_sdf, res_sizes,
+            out_masks, out_scores, res_labels, res_sdf, res_boxes,
             num_layer_pos_samples, neg_to_pos_ratio,
             pos_sdf_threshold, neg_sdf_threshold,
             pos_size_limits, neg_size_limits
@@ -160,23 +153,59 @@ def get_train_pairs_single(labels, sdf, obj_sizes, net_out, pixel_sizes, samples
     return outputs
 
 
-def resample_data(labels, sdf, obj_sizes, pixel_sizes):
+def get_object_boxes(labels):
+    assert labels.dim() == 2
+    count = labels.max()
+    if count == 0:
+        return torch.zeros(4, *labels.shape).cuda()
+
+    label_nums = torch.arange(1, count + 1).long().cuda()
+    masks = (labels.unsqueeze(0) == label_nums.view(-1, 1, 1)).float()
+
+    nonzero_idx = (masks.sum(-1).sum(-1) != 0).nonzero().squeeze()
+    count = len(nonzero_idx)
+    if count == 0:
+        return torch.zeros(4, *labels.shape).cuda()
+    masks = masks.index_select(0, nonzero_idx)
+
+    size_range = torch.arange(labels.shape[0]).cuda()
+    size_range_rev = torch.arange(labels.shape[0] - 1, -1, -1).cuda()
+
+    y_range_mask = masks * size_range.unsqueeze(1)
+    y_range_mask_rev = masks * size_range_rev.unsqueeze(1)
+    x_range_mask = masks * size_range.unsqueeze(0)
+    x_range_mask_rev = masks * size_range_rev.unsqueeze(0)
+
+    y_min = labels.shape[0] - 1 - y_range_mask_rev.view(count, -1).max(1)[0]
+    y_max = y_range_mask.view(count, -1).max(1)[0]
+    x_min = labels.shape[0] - 1 - x_range_mask_rev.view(count, -1).max(1)[0]
+    x_max = x_range_mask.view(count, -1).max(1)[0]
+    assert y_min.dim() == 1, y_min.shape
+
+    box_vec = torch.stack([y_min, x_min, y_max - y_min, x_max - x_min], 1)
+    assert box_vec.shape == (count, 4)
+    box_mask = masks.unsqueeze(1) * box_vec.view(count, 4, 1, 1)
+    box_mask = box_mask.sum(0)
+    return box_mask
+
+
+def resample_data(labels, sdf, box_mask, pixel_sizes):
     assert labels.shape == sdf.shape
     assert labels.dim() == 2
     resampled = []
     for px_size in pixel_sizes:
         assert labels.shape[-1] % px_size == 0
         if px_size == 1:
-            res_labels, res_sdf, res_sizes = labels, sdf, obj_sizes
+            res_labels, res_sdf, res_boxes = labels, sdf, box_mask
         else:
             res_labels = labels[px_size // 2 - 1::px_size, px_size // 2 - 1::px_size]
-            res_sizes = obj_sizes[px_size // 2 - 1::px_size, px_size // 2 - 1::px_size] / px_size
+            res_boxes = box_mask[:, px_size // 2 - 1::px_size, px_size // 2 - 1::px_size] / px_size
             res_sdf = F.avg_pool2d(Variable(sdf.view(1, 1, *sdf.shape), volatile=True), px_size, px_size).data[0, 0]
-        resampled.append((res_labels, res_sdf, res_sizes))
+        resampled.append((res_labels, res_sdf, res_boxes))
     return resampled
 
 
-def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_sizes,
+def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes,
                                max_pos_samples_count, neg_to_pos_ratio,
                                pos_sdf_threshold, neg_sdf_threshold,
                                pos_size_limits, neg_size_limits):
@@ -204,7 +233,7 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_sizes,
         slice(border, -border + 1, stride),
         slice(border, -border + 1, stride))
     sdf_centers = sdf[mask_centers_slice]
-    size_centers = obj_sizes[mask_centers_slice] / FPN.mask_size
+    size_centers = torch.max(obj_boxes[2], obj_boxes[3])[mask_centers_slice] / FPN.mask_size
 
     assert sdf_centers.shape == out_masks.shape[:2], (sdf_centers.shape, out_masks.shape)
 
