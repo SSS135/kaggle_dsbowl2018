@@ -34,15 +34,15 @@ def binary_focal_loss_with_logits(pred, target, lam=2, reduce=True):
     return loss.mean() if reduce else loss
 
 
-def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7):
-    samples_per_image = 128
+def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, model=None, return_predictions_at_epoch=None):
+    samples_per_image = 64
 
     dataset = NucleiDataset(train_data, supersample=1)
     dataloader = torch.utils.data.DataLoader(
-        dataset, shuffle=True, batch_size=1, pin_memory=True)
+        dataset, shuffle=True, batch_size=4, pin_memory=True)
 
-    model = FPN(3).cuda()
-    optimizer = GAdam(get_param_groups(model), lr=0.0001, nesterov=0.0, weight_decay=5e-4,
+    model = FPN(3).cuda() if model is None else model.cuda()
+    optimizer = GAdam(get_param_groups(model), lr=2e-4, nesterov=0.75, weight_decay=5e-4,
                       avg_sq_mode='tensor', amsgrad=False)
 
     scheduler = CosineAnnealingRestartLR(optimizer, len(dataloader), 2)
@@ -77,8 +77,8 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7):
                 # print(pred_masks.shape, target_masks.shape, pred_scores.shape, target_scores.shape)
                 # print([(v.mean(), v.std(), v.min(), v.max()) for v in (pred_masks.data, target_masks.data, pred_scores.data, target_scores.data)])
 
-                if epoch == 31:
-                    return pred_masks.data, target_masks.data, best_model
+                if return_predictions_at_epoch is not None and return_predictions_at_epoch == epoch:
+                    return pred_masks.data.cpu(), target_masks.data.cpu(), x_train.data.cpu(), labels.cpu(), best_model
 
                 mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks)
                 score_loss = binary_focal_loss_with_logits(pred_scores, target_scores)
@@ -239,115 +239,3 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_sizes,
     pred_masks = out_masks.view(-1, FPN.mask_size, FPN.mask_size).index_select(0, Variable(pred_pos_scores_idx))
 
     return pred_masks, target_masks, pred_scores, target_scores
-
-
-# def get_mask_train_pairs(output_masks_scores, labels, sdf, samples_count, strides, pixel_sizes,
-#                          neg_to_pos_ratio=3, pos_sdf_threshold=0.5, neg_sdf_threshold=0.2):
-#     assert samples_count % (neg_to_pos_ratio + 1) == 0
-#     positive_positions = generate_positive_samples_positions(
-#         sdf, pos_sdf_threshold, samples_count // (neg_to_pos_ratio + 1))
-#     negative_positions = generate_negative_samples_positions(
-#         sdf, neg_sdf_threshold, samples_count - len(positive_positions))
-#     scores = get_scores(positive_positions, output_masks_scores, strides, pixel_sizes)
-#     pos_masks = get_masks(positive_positions, scores)
-#     mask_pairs = match_output_mask_with_target(output_masks_scores, pos_masks, scores, positive_positions)
-#     score_pairs = match_output_score_with_target(output_masks_scores, negative_positions)
-#
-#
-# def generate_positive_samples_positions(sdf, sdf_threshold, count):
-#     return sdf
-#
-#
-# def generate_negative_samples_positions(sdf, sdf_threshold, count):
-#     return sdf
-#
-#
-# def get_scores(img_positions, output_masks, strides, pixel_sizes):
-#     return img_positions
-#
-#
-# def get_masks(img_positions, scores):
-#     return img_positions
-#
-#
-# def match_output_mask_with_target(output_masks, target_masks, scores, img_positions):
-#     return output_masks
-#
-#
-# def match_output_score_with_target():
-#     pass
-#
-#
-# def generate_mask(mask, img_pos, conv_pos, pixel_size):
-#     assert 0 <= img_pos[0] < train_size and 0 <= img_pos[1] < train_size, img_pos
-#     assert 0 <= conv_pos[0] < train_size and 0 <= conv_pos[1] < train_size, conv_pos
-#     assert int(pixel_size * FPN.mask_size) == round(pixel_size * FPN.mask_size, 3), (pixel_size, FPN.mask_size)
-#     assert 0.5 < mask.max() <= 1
-#     size = int(pixel_size * FPN.mask_size)
-#     chunk = mask[conv_pos[0] - size // 2: conv_pos[0] + size // 2, conv_pos[1] - size // 2: conv_pos[1] + size // 2]
-#     chunk = F.adaptive_avg_pool2d(chunk.float(), FPN.mask_size).data
-#     return chunk
-#
-#
-# def get_nearest_conv_pos(img_pos, stride, fmap_size):
-#     assert 0 <= img_pos[0] < train_size and 0 <= img_pos[1] < train_size, img_pos
-#     assert fmap_size % 2 == 1
-#     conv_pos = np.round((img_pos - train_size // 2) / stride)
-#     conv_pos = conv_pos.clip(-fmap_size // 2, fmap_size // 2).astype(np.int32)
-#     conv_pos = conv_pos * stride + train_size // 2
-#     return conv_pos
-#
-#
-# def get_score(img_bounds, conv_pos, pixel_size):
-#     size = obj_size_mask[img_pos[0], img_pos[1]]
-#
-#
-# def get_obj_bounds(mask):
-#     v_line = mask.sum(1).nonzero()
-#     h_line = mask.sum(0).nonzero()
-#     y_min, y_max = v_line.min(), v_line.max()
-#     x_min, x_max = h_line.min(), h_line.max()
-#     return np.array([y_min, x_min, y_max - y_min, x_max - x_min, ])
-#
-#
-# def generate_region_samples(labels_cpu, sdf_cpu, labels_cuda, sdf_cuda, samples_per_image, sample_size,
-#                             neg_to_pos_ratio=3, pos_sdf_threshold=0.4, neg_sdf_threshold=0.2):
-#     labels_np = labels_cpu.numpy().squeeze(1)
-#     sdf_np = sdf_cpu.numpy().squeeze(1)
-#
-#     pad = sample_size // 2
-#     sdf_center = sdf_np[:, pad:-pad, pad: -pad]
-#     sdf_np = np.full_like(sdf_np, -1, dtype=sdf_np.dtype)
-#     sdf_np[:, pad:-pad, pad: -pad] = sdf_center
-#
-#     samples = [generate_region_samples_single(*x, samples_per_image, sample_size, pos_sdf_threshold, neg_sdf_threshold)
-#                for x in zip(labels_np, sdf_np, labels_cuda, sdf_cuda)]
-#
-#
-# def generate_region_samples_single(labels_np, sdf_np, labels_cuda, sdf_cuda, samples_count, sample_size,
-#                                    neg_to_pos_ratio, pos_sdf_threshold, neg_sdf_threshold):
-#     assert samples_count % (neg_to_pos_ratio + 1) == 0
-#     pos_samples_count = samples_count // (neg_to_pos_ratio + 1)
-#     pos_sample_rect_pos, obj_sizes, label_nums = generate_positive_samples_info(
-#         labels_np, sdf_np, pos_samples_count, sample_size, pos_sdf_threshold)
-#     pos_samples_count = len(pos_sample_rect_pos)
-#     neg_samples_count = samples_count - pos_samples_count
-#     neg_sample_rect_pos = generate_negative_samples_info(sdf_np, neg_samples_count, sample_size, neg_sdf_threshold)
-#
-#
-# def generate_positive_samples_info(labels, sdf, samples_count, sample_size, sdf_threshold):
-#     indexes = np.nonzero(sdf > sdf_threshold)
-#     indexes = rng.choice(indexes, min(len(indexes), samples_count), replace=False)
-#     label_nums = labels[indexes]
-#     labels = labels * np.isin(labels, label_nums)
-#     objs = [x for x in ndimage.find_objects(labels) if x is not None]
-#     obj_sizes = [max(y.end - y.start, x.end - x.start) / sample_size for (y, x, _) in objs]
-#     sample_rect_pos = [(cy - sample_size // 2, cx - sample_size // 2) for cy, cx in np.transpose(indexes)]
-#     return sample_rect_pos, obj_sizes, label_nums
-#
-#
-# def generate_negative_samples_info(sdf, samples_count, sample_size, sdf_threshold):
-#     indexes = np.nonzero(sdf < sdf_threshold)
-#     indexes = rng.choice(indexes, samples_count, replace=False)
-#     sample_rect_pos = [(cy - sample_size // 2, cx - sample_size // 2) for cy, cx in np.transpose(indexes)]
-#     return sample_rect_pos

@@ -34,7 +34,7 @@ class Pad:
 
 
 class RandomAffineCrop:
-    def __init__(self, size, padding=0, rotation={(0, 0)}, scale=(1, 1),
+    def __init__(self, size, padding=0, rotation=(0,), scale=(1, 1),
                  horizontal_flip=False, vertical_flip=False, pad_mode='constant',
                  callback=None):
         self.size = size
@@ -61,9 +61,9 @@ class RandomAffineCrop:
         vflip = self.vertical_flip and random.random() > 0.5
         rot_padded_size = np.abs(self.rotate_vec_2d(self.size, self.size, rotation)).max()
         # FIXME: 1.05 will fix corners, too lazy for math
-        if abs(rotation) > 1:
+        if abs(rotation % (math.pi / 2)) > 0.05:
             rot_padded_size *= 1.05
-        rot_padded_scaled_size = math.ceil(rot_padded_size * scale)
+        rot_padded_scaled_size = math.ceil(rot_padded_size / scale)
         rot_padded_size = math.ceil(rot_padded_size)
 
         rot_pad = round((rot_padded_size - self.size) / 2)
@@ -87,6 +87,8 @@ class RandomAffineCrop:
             x = x.squeeze(0)
         x = torch.from_numpy(x).type_as(input)
 
+        # print(input.shape, x.shape, rotation, scale, (hflip, vflip), rot_padded_size, rot_padded_scaled_size, pad, (crop_y, crop_x))
+
         return x
 
     @staticmethod
@@ -100,8 +102,8 @@ class RandomAffineCrop:
             [0, 0, 1]
         ], dtype=np.float32)
         scale_transform = np.array([
-            [scale, 0, 0],
-            [0, scale, 0],
+            [1 / scale, 0, 0],
+            [0, 1 / scale, 0],
             [0, 0, 1]
         ], dtype=np.float32)
         flip_transform = np.array([

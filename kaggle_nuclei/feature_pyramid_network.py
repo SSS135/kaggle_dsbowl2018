@@ -2,7 +2,7 @@
 
 import torch.nn.functional as F
 from torch import nn
-from torchvision.models.resnet import ResNet, Bottleneck, model_zoo, model_urls, resnet50
+from torchvision.models.resnet import ResNet, Bottleneck, model_zoo, model_urls, resnet50, resnet101
 import torch
 
 
@@ -43,11 +43,6 @@ class FPN(nn.Module):
 
         # Top layer
         self.toplayer = nn.Conv2d(2048, d, kernel_size=1, stride=1, padding=0)  # Reduce channels
-
-        # Smooth layers
-        # self.smooth1 = nn.Conv2d(d, d, kernel_size=3, stride=1, padding=1)
-        # self.smooth2 = nn.Conv2d(d, d, kernel_size=3, stride=1, padding=1)
-        # self.smooth3 = nn.Conv2d(d, d, kernel_size=3, stride=1, padding=1)
 
         # Lateral layers
         self.latlayer1 = nn.Conv2d(1024, d, kernel_size=1, stride=1, padding=0)
@@ -95,10 +90,6 @@ class FPN(nn.Module):
         p4 = self._upsample_add(p5, self.latlayer1(c4))
         p3 = self._upsample_add(p4, self.latlayer2(c3))
         p2 = self._upsample_add(p3, self.latlayer3(c2))
-        # Smooth
-        # p4 = self.smooth1(p4)
-        # p3 = self.smooth2(p3)
-        # p2 = self.smooth3(p2)
 
         if output_unpadding != 0:
             assert output_unpadding % 32 == 0
