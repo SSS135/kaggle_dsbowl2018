@@ -71,7 +71,8 @@ class FPN(nn.Module):
         upsampled feature map size: [N,_,16,16]
         So we choose bilinear upsample which supports arbitrary output sizes.
         '''
-        _, _, H, W = y.size()
+        assert y.shape[2] % x.shape[2] == 0 and y.shape[3] % x.shape[3] == 0
+        _, _, H, W = y.shape
         return F.upsample(x, size=(H, W), mode='bilinear') + y
 
     def forward(self, x, output_unpadding=0):

@@ -9,12 +9,16 @@ from skimage.transform import resize
 from torch.autograd import Variable
 from tqdm import tqdm
 from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
+from .feature_pyramid_network import FPN
 
 
 mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
+img_size_div = 32
+border_pad = 64
+total_pad = train_pad + border_pad
 
 
-def predict(model, raw_data, max_scale=2, tested_scales=7):
+def predict_rpn(model, raw_data, stride=4, max_stride=32, max_scale=1, tested_scales=1):
     model.eval()
 
     max_scale = math.log10(max_scale)
@@ -26,7 +30,8 @@ def predict(model, raw_data, max_scale=2, tested_scales=7):
         out_mean = None
         sum_count = 0
         for scale in scales:
-            out = [predict_single(model, img, scale, flip_type=f) for f in range(4)]
+            out = extract_proposals_from_image(model, img, scale, 0)
+            return out
             if out[0] is None:
                 continue
             out = reduce(np.add, out)
@@ -41,29 +46,66 @@ def predict(model, raw_data, max_scale=2, tested_scales=7):
     return results
 
 
-def predict_single(model, img, scale=1, flip_type: 0 or 1 or 2 or 3=0):
-    div = 32
+def extract_strided_proposals_from_image(model, img, scale=1, score_threshold=0.8,
+                                         stride_start=-15, stride_end=16, stride=5):
+    proposals = []
+    for offset_y in range(stride_start, stride_end, stride):
+        for offset_x in range(stride_start, stride_end, stride):
+            new = extract_proposals_from_image(model, img, scale, score_threshold, (offset_y, offset_x))
+            proposals.extend(new)
+    return proposals
+
+
+def extract_proposals_from_image(model, img, scale=1, score_threshold=0.8, pad_offset=(0, 0)):
     img = img.numpy().transpose(1, 2, 0)
-    s_shape = (np.array(img.shape) * scale / div).round().astype(int) * div + train_pad * 2
-    if np.max(s_shape) > 2048:
+    s_shape = (np.array(img.shape[:2]) * scale / img_size_div).round().astype(int) * img_size_div
+    if np.max(s_shape) > 1024:
         # print(f'ignoring scale {scale}, size {tuple(s_shape)}, '
         #       f'source size {tuple(img.shape)} for {data["name"][:16]}')
         return None
 
     x = scipy.misc.imresize(img, s_shape).astype(np.float32) / 255
+    padding = (total_pad + pad_offset[0], total_pad - pad_offset[0]), \
+              (total_pad + pad_offset[1], total_pad - pad_offset[1]), \
+              (0, 0)
+    x = np.pad(x, padding, mode='reflect')
     x = x.transpose(2, 0, 1)
     x = torch.from_numpy(x).unsqueeze(0).cuda()
     x = (x - mean_std_sub[0].view(1, -1, 1, 1)) / mean_std_sub[1].view(1, -1, 1, 1)
-    x = flips[flip_type](x)
-    x = F.pad(x, 4 * (train_pad,), mode='reflect').data
+    # x = flips[flip_type](x)
     # noise = x.new(1, 1, *x.shape[2:]).normal_(0, 1)
     # x = torch.cat([x, noise], 1)
-    x = model(Variable(x, volatile=True)).data
-    x = flips[flip_type](x).cpu()
-    x = x[0, :, train_pad:-train_pad, train_pad:-train_pad]
-    x = x.cpu().numpy()
-    x = np.stack([scipy.misc.imresize(o, img.shape[:2], mode='F') for o in x], 2)
-    return x
+
+    out_layers = model(Variable(x, volatile=True), train_pad)
+    real_scale = s_shape / np.array(img.shape[:2])
+    preds = [extract_proposals_from_layer(ly, psz, str, real_scale, score_threshold)
+             for ly, psz, str in zip(out_layers, model.mask_pixel_sizes, model.mask_strides)]
+    preds = [p for p in preds if p is not None]
+    preds = [(m, s, (p - np.array(pad_offset) - border_pad) / real_scale)
+             for masks, scores, positions in preds
+             for m, s, p in zip(masks, scores, positions)]
+    return preds
+
+
+def extract_proposals_from_layer(layer, pixel_size, stride, scale, sigmoid_score_threshold):
+    masks, scores = [x.data for x in layer]
+    logit_score_threshold = logit(sigmoid_score_threshold)
+    good_idx = (scores > logit_score_threshold).view(-1).nonzero().squeeze()
+    if len(good_idx) == 0:
+        return None
+    good_masks = masks.view(-1, *masks.shape[-2:]).index_select(0, good_idx)
+    good_masks = Variable(good_masks.unsqueeze(1), volatile=True)
+    size = (np.array(masks.shape[-2:]) * pixel_size / scale).round().astype(int)
+    size = size[0].item(), size[1].item()
+    good_masks = F.upsample(good_masks, size, mode='bilinear').data.squeeze(1)
+    good_scores = scores.view(-1)[good_idx]
+    good_positions = torch.stack([good_idx / masks.shape[-3], good_idx % masks.shape[-3]], 1)
+    good_positions = good_positions * stride
+    return good_masks.cpu().numpy(), good_scores.cpu().numpy(), good_positions.cpu().numpy()
+
+
+def logit(x):
+    return math.log(x / (1 - x))
 
 
 # https://github.com/pytorch/pytorch/issues/229

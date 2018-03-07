@@ -9,3 +9,4 @@ from .preprocessor_training import train_preprocessor
 from .postprocessor_training import train_postprocessor_ppo
 from .preprocessor_gan_training import train_preprocessor_gan
 from .preprocessor_rpn_training import train_preprocessor_rpn
+from .predictor_rpn import predict_rpn, extract_proposals_from_image, extract_strided_proposals_from_image
