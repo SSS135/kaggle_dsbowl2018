@@ -3,10 +3,9 @@ import numpy as np
 import torch
 
 
-def iou(pred, target, bin_threshold=0.5):
+def iou(pred, target):
     assert pred.dim() > 2 and pred.shape == target.shape
-    pred = pred > bin_threshold
-    target = target > 0
+    assert type(pred) == type(target) and type(pred).__name__.find('ByteTensor') != -1, (type(pred), type(target))
     bs = pred.shape[0]
     pred, target = pred.view(bs, -1), target.view(bs, -1)
     union = (pred | target).long().sum(-1)

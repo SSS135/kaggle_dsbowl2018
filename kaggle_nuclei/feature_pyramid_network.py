@@ -41,7 +41,7 @@ class FPN(nn.Module):
     def __init__(self, num_scores=1, num_filters=256):
         super().__init__()
 
-        self.mask_pixel_sizes = (0.5, 1, 2, 4)
+        self.mask_pixel_sizes = (1, 2, 4, 8) if self.mask_size == 16 else (0.5, 1, 2, 4)
         self.mask_strides = (4, 8, 16, 32)
         self.resnet = resnet50(True)
 

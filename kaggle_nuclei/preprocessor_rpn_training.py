@@ -32,38 +32,44 @@ def binary_cross_entropy_with_logits(x, z, reduce=True):
 
 def binary_focal_loss_with_logits(pred, target, lam=2, reduce=True):
     ce = binary_cross_entropy_with_logits(pred, target, False)
-    loss = (target - pred).abs().pow(lam) * ce
+    loss = (target - F.sigmoid(pred)).abs().pow(lam) * ce
+    return loss.mean() if reduce else loss
+
+
+def mse_focal_loss(pred, target, lam=2, reduce=True):
+    mse = F.mse_loss(pred, target, reduce=False)
+    loss = (pred - target).clamp(-1, 1).abs().pow(lam) * mse
     return loss.mean() if reduce else loss
 
 
 def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, model=None, return_predictions_at_epoch=None):
     samples_per_image = 64
 
-    dataset = NucleiDataset(train_data, supersample=1)
-    dataloader = torch.utils.data.DataLoader(
-        dataset, shuffle=True, batch_size=4, pin_memory=True)
+    dataset = NucleiDataset(train_data)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=4, pin_memory=True)
 
     model_gen = FPN(1).cuda() if model is None else model.cuda()
-    # model_disc = GanD(4).cuda()
+    model_gen.freeze_pretrained_layers(False)
+    model_disc = GanD(4).cuda()
 
     # model_gen.apply(weights_init)
     # model_disc.apply(weights_init)
 
     # optimizer = torch.optim.SGD(get_param_groups(model), lr=0.05, momentum=0.9, weight_decay=5e-4)
-    optimizer_gen = GAdam(get_param_groups(model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='weight',
-                           amsgrad=False, nesterov=0.5, weight_decay=1e-5, norm_weight_decay=False)
-    # optimizer_disc = GAdam(get_param_groups(model_disc), lr=5e-4, betas=(0.5, 0.999), avg_sq_mode='tensor',
-    #                        amsgrad=False, nesterov=0.5, weight_decay=1e-5, norm_weight_decay=False)
+    optimizer_gen = GAdam(get_param_groups(model_gen), lr=5e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+                          amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
+    optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+                          amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
     scheduler_gen = CosineAnnealingRestartLR(optimizer_gen, len(dataloader), 2)
-    # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
+    scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
     pad = dataloader.dataset.padding
     best_model = model_gen
     best_score = -math.inf
 
-    # one = Variable(torch.cuda.FloatTensor([0.95]))
-    # zero = Variable(torch.cuda.FloatTensor([0.05]))
+    one = Variable(torch.cuda.FloatTensor([0.95]))
+    zero = Variable(torch.cuda.FloatTensor([0.05]))
 
     sys.stdout.flush()
 
@@ -96,55 +102,54 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, model=None,
 
                 target_masks = Variable(target_masks.clamp(0.05, 0.95))
                 target_scores = Variable(target_scores.clamp(0.05, 0.95))
-                # img_crops = Variable(img_crops)
-                #
-                # # real
-                #
-                # # for p in model_disc.parameters():
-                # #     p.data.clamp_(-0.01, 0.01)
-                #
-                # optimizer_disc.zero_grad()
-                #
-                # read_disc_in = torch.cat([img_crops, target_masks], 1)
-                # real_d, real_features = model_disc(read_disc_in)
-                # loss_real = 0
-                # # loss_real += -real_d.mean()
-                # loss_real += binary_focal_loss_with_logits(real_d, one.expand_as(real_d))
-                # # loss_real += 0.5 * (1 - real_d.clamp(max=1)).pow_(2).mean()
-                # # loss_real += 0.5 * (1 - real_d).pow_(2).mean()
-                # loss_real.backward()
-                #
-                # # fake
-                #
-                # fake_disc_in = torch.cat([img_crops, F.sigmoid(pred_masks)], 1)
-                # fake_d, fake_features = model_disc(fake_disc_in.detach())
-                # loss_fake = 0
-                # # loss_fake += fake_d.mean()
-                # loss_fake += binary_focal_loss_with_logits(fake_d, zero.expand_as(fake_d))
-                # # loss_fake += 0.5 * (-1 - fake_d.clamp(min=-1)).pow_(2).mean()
-                # # loss_fake += 0.5 * (0 - fake_d).pow_(2).mean()
-                # loss_fake.backward()
-                #
-                # # gradient_penalty = calc_gradient_penalty(model_disc, read_disc_in.data, fake_disc_in.data)
-                # # gradient_penalty.backward()
-                #
-                # optimizer_disc.step()
-                #
-                # # gen
-                #
-                # gen_d, fake_features = model_disc(fake_disc_in)
-                # loss_gen = 0
-                # # loss_gen += -gen_d.mean()
-                # # loss_gen += binary_focal_loss_with_logits(gen_d, one.expand_as(gen_d))
-                # # loss_gen += 0.5 * (1 - gen_d.div(3).clamp(min=-1)).pow_(2).mean()
-                # # loss_gen += 0.5 * (1 - gen_d).pow_(2).mean()
-                # feature_loss = F.mse_loss(fake_features, real_features.detach())
-                # loss_gen += feature_loss * feature_loss
-                # # loss_gen += F.mse_loss(gen_d, real_d.detach())
+                img_crops = Variable(img_crops)
+
+                # real
+
+                # for p in model_disc.parameters():
+                #     p.data.clamp_(-0.01, 0.01)
+
+                optimizer_disc.zero_grad()
+
+                read_disc_in = torch.cat([img_crops, target_masks], 1)
+                real_d, real_features = model_disc(read_disc_in)
+                loss_real = 0
+                # loss_real += -real_d.mean()
+                loss_real += F.binary_cross_entropy_with_logits(real_d, one.expand_as(real_d))
+                # loss_real += 0.5 * (1 - real_d.clamp(max=1)).pow_(2).mean()
+                # loss_real += 0.5 * (1 - real_d).pow_(2).mean()
+                loss_real.backward()
+
+                # fake
+
+                fake_disc_in = torch.cat([img_crops, F.sigmoid(pred_masks)], 1)
+                fake_d, fake_features = model_disc(fake_disc_in.detach())
+                loss_fake = 0
+                # loss_fake += fake_d.mean()
+                loss_fake += F.binary_cross_entropy_with_logits(fake_d, zero.expand_as(fake_d))
+                # loss_fake += 0.5 * (-1 - fake_d.clamp(min=-1)).pow_(2).mean()
+                # loss_fake += 0.5 * (0 - fake_d).pow_(2).mean()
+                loss_fake.backward()
+
+                # gradient_penalty = calc_gradient_penalty(model_disc, read_disc_in.data, fake_disc_in.data)
+                # gradient_penalty.backward()
+
+                optimizer_disc.step()
+
+                # gen
+
+                gen_d, fake_features = model_disc(fake_disc_in)
+                loss_gen = 0
+                # loss_gen += -gen_d.mean()
+                # loss_gen += binary_focal_loss_with_logits(gen_d, one.expand_as(gen_d))
+                # loss_gen += 0.5 * (1 - gen_d.div(3).clamp(min=-1)).pow_(2).mean()
+                # loss_gen += 0.5 * (1 - gen_d).pow_(2).mean()
+                loss_gen += F.mse_loss(fake_features, real_features.detach())
+                # loss_gen += F.mse_loss(gen_d, real_d.detach())
 
                 mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks)
                 score_loss = binary_focal_loss_with_logits(pred_scores, target_scores)
-                loss = mask_loss + 0.1 * score_loss
+                loss = mask_loss + 0.1 * loss_gen + 0.1 * score_loss
 
                 loss.backward()
                 optimizer_gen.step()
@@ -153,12 +158,12 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, model=None,
                 # scheduler_disc.step()
 
                 pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
-                target_score_np = target_scores.data.byte().cpu().numpy().reshape(-1)
+                target_score_np = (target_scores.data > 0.5).byte().cpu().numpy().reshape(-1)
 
                 _, _, score_fscore, _ = precision_recall_fscore_support(
                     pred_score_np, target_score_np, average='binary', warn_for=[])
 
-                f_iou = iou(pred_masks.data, target_masks.data, 0)
+                f_iou = iou(pred_masks.data > 0, target_masks.data > 0.5)
                 t_iou = threshold_iou(f_iou)
 
                 bc = 1 - 0.99 ** (i + 1)
