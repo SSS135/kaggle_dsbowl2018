@@ -2,7 +2,7 @@
 
 import torch.nn.functional as F
 from torch import nn
-from torchvision.models.resnet import ResNet, Bottleneck, model_zoo, model_urls, resnet50, resnet101
+from torchvision.models.resnet import resnet50, resnet101
 import torch
 
 
@@ -12,13 +12,16 @@ class MaskMLP(nn.Module):
         self.in_channels = in_channels
         self.num_scores = num_scores
         self.net = nn.Sequential(
-            nn.Conv2d(in_channels, nf, 3, 1, 1),
+            nn.Conv2d(in_channels, nf, 3, 1, 1, bias=False),
             nn.BatchNorm2d(nf),
-            nn.ReLU(),
-            nn.Conv2d(nf, nf, 3, 1, 1),
+            nn.ReLU(True),
+            nn.Conv2d(nf, nf, 3, 1, 1, bias=False),
             nn.BatchNorm2d(nf),
-            nn.ReLU(),
-            nn.Conv2d(nf, nf, FPN.mask_kernel_size),
+            nn.ReLU(True),
+            nn.Conv2d(nf, nf, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(nf),
+            nn.ReLU(True),
+            nn.Conv2d(nf, nf, FPN.mask_kernel_size, bias=False),
             nn.Conv2d(nf, FPN.mask_size * FPN.mask_size + num_scores, 1),
         )
 
@@ -32,13 +35,13 @@ class MaskMLP(nn.Module):
 
 
 class FPN(nn.Module):
-    mask_size = 16
+    mask_size = 32
     mask_kernel_size = 4
 
     def __init__(self, num_scores=1, num_filters=256):
         super().__init__()
 
-        self.mask_pixel_sizes = (1, 2, 4, 8)
+        self.mask_pixel_sizes = (0.5, 1, 2, 4)
         self.mask_strides = (4, 8, 16, 32)
         self.resnet = resnet50(True)
 
