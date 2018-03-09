@@ -14,7 +14,7 @@ from tqdm import tqdm
 from torch import nn
 
 from .dataset import NucleiDataset
-from .feature_pyramid_network import FPN
+from .feature_pyramid_network import FPN, MaskHead
 from .iou import threshold_iou, iou
 from .losses import dice_loss, soft_dice_loss, clipped_mse_loss
 from .unet import UNet
@@ -43,7 +43,7 @@ def mse_focal_loss(pred, target, lam=2, reduce=True):
 
 
 def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None):
-    samples_per_image = 64
+    samples_per_image = 256
 
     dataset = NucleiDataset(train_data)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=4, pin_memory=True)
@@ -94,6 +94,8 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
                     continue
 
                 pred_masks, target_masks, pred_scores, target_scores, img_crops, layer_idx = train_pairs
+
+                pred_masks = model_gen.predict_masks(pred_masks)
 
                 bm_idx, bm_count = np.unique(layer_idx, return_counts=True)
                 batch_masks[bm_idx] += bm_count
@@ -187,7 +189,7 @@ def get_train_pairs(
         pos_size_limits=(0.4, 0.85), neg_size_limits=(0.2, 1.2)):
     outputs = []
     for sample_idx in range(labels.shape[0]):
-        net_out_sample = [(m[sample_idx, 0], s[sample_idx, 0]) for m, s in net_out]
+        net_out_sample = [(m[sample_idx], s[sample_idx, 0]) for m, s in net_out]
         o = get_train_pairs_single(
             labels[sample_idx, 0], sdf[sample_idx, 0], img[sample_idx], net_out_sample,
             pixel_sizes, samples_count, neg_to_pos_ratio, pos_sdf_threshold, neg_sdf_threshold,
@@ -201,7 +203,7 @@ def get_train_pairs(
     outputs = list(zip(*outputs))
     outputs, layer_idx = outputs[:-1], np.concatenate(outputs[-1])
     pred_masks, target_masks, pred_scores, target_scores, img_crops = [torch.cat(o, 0) for o in outputs]
-    return pred_masks.unsqueeze(1), target_masks.unsqueeze(1).float(), pred_scores, target_scores, img_crops, layer_idx
+    return pred_masks, target_masks.unsqueeze(1).float(), pred_scores, target_scores, img_crops, layer_idx
 
 
 def get_train_pairs_single(labels, sdf, img, net_out, pixel_sizes, samples_count,
@@ -340,6 +342,10 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
                                max_pos_samples_count, neg_to_pos_ratio,
                                pos_sdf_threshold, neg_sdf_threshold,
                                pos_size_limits, neg_size_limits):
+    # border and stride for converting between image space and conv-center space
+    border = FPN.mask_size // 2
+    stride = FPN.mask_size // FPN.mask_kernel_size
+
     def upscaled_indexes(mask, max_count):
         # convert `mask` from binary mask to 2d indexes and upscale them from conv-center space to image space
         idx = mask.nonzero() * stride + border
@@ -350,22 +356,19 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
         idx = idx[:, 0] * labels.shape[-1] + idx[:, 1]
         return idx, perm
 
-    def center_crop(image, centers):
+    def center_crop(image, centers, border=(-border, border), raw_size=labels.shape[-1]):
         # get 2d indexes of `centers`
-        centers_y = centers / labels.shape[-1]
-        centers_x = centers - centers_y * labels.shape[-1]
+        centers_y = centers / raw_size
+        centers_x = centers - centers_y * raw_size
         centers = torch.stack([centers_y, centers_x], 1).cpu()
         assert centers.shape == (centers_x.shape[0], 2), centers.shape
         # crop `image` in +-border range from centers
         crops = []
         for c in centers:
-            crop = image[..., c[0] - border: c[0] + border, c[1] - border: c[1] + border]
+            crop = image[..., c[0] + border[0]: c[0] + border[1], c[1] + border[0]: c[1] + border[1]]
             crops.append(crop)
         return torch.stack(crops, 0)
 
-    # border and stride for converting between image space and conv-center space
-    border = FPN.mask_size // 2
-    stride = FPN.mask_size // FPN.mask_kernel_size
     # slice to select values from image at conv center locations
     mask_centers_slice = (
         slice(border, -border + 1, stride),
@@ -392,7 +395,7 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
     # [fs, fs] with [0, 0.5] where 0.5 is half mask offset from center
     biggest_offsets = biggest_offsets.div(FPN.mask_size).max(0)[0]
 
-    assert sdf_fs.shape == out_masks.shape[:2], (sdf_fs.shape, out_masks.shape)
+    assert sdf_fs.shape == 2 * (out_masks.shape[1] - MaskHead.conv_size + 1,), (sdf_fs.shape, out_masks.shape)
 
     pos_centers_fmap = (biggest_offsets < pos_size_limits[1] / 2) & \
                        (size_fs > pos_size_limits[0]) & \
@@ -422,7 +425,9 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
     label_crops = center_crop(labels, pos_centers)
     pos_center_label_nums = labels.take(pos_centers)
     target_masks = label_crops == pos_center_label_nums.view(-1, 1, 1)
-    pred_masks = out_masks.view(-1, FPN.mask_size, FPN.mask_size).index_select(0, Variable(pred_pos_scores_idx))
+    # pred_masks = out_masks.view(-1, FPN.mask_size, FPN.mask_size).index_select(0, Variable(pred_pos_scores_idx))
+    # [num masks, conv channels, conv size, conv size]
+    pred_masks = center_crop(out_masks, pred_pos_scores_idx, (0, MaskHead.conv_size), pos_centers_fmap.shape[0])
     img_crops = center_crop(img, pos_centers)
 
     return pred_masks, target_masks, pred_scores, target_scores, img_crops

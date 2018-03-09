@@ -7,21 +7,24 @@ import torch
 from .conv_chunk import ConvChunk2d
 
 
-class MaskMLP(nn.Module):
-    def __init__(self, in_channels, num_scores, num_filters=128):
-        super().__init__()
-        assert FPN.mask_size % 4 == 0
-        self.in_channels = in_channels
-        self.num_scores = num_scores
+class MaskHead(nn.Module):
+    conv_size = 4
 
-        # mask layers
-        self.mask_layers = [
-            nn.Conv2d(in_channels, num_filters, 3, 1, 1, bias=True),
-            # nn.BatchNorm2d(num_filters),
+    def __init__(self, in_channels, num_filters=128):
+        super().__init__()
+        assert FPN.mask_size % self.conv_size == 0
+        self.in_channels = in_channels
+        self.num_filters = num_filters
+
+        self.preproc_layers = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, 3, 1, 1),
             nn.ReLU(True),
-            ConvChunk2d(num_filters, 4)
-        ]
-        cur_size = 4
+            nn.Conv2d(in_channels, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters),
+            nn.ReLU(True),
+        )
+        self.mask_layers = []
+        cur_size = self.conv_size
         cur_filters = num_filters
         while cur_size != FPN.mask_size:
             prev_filters = cur_filters
@@ -29,14 +32,26 @@ class MaskMLP(nn.Module):
             cur_size *= 2
             self.mask_layers.extend([
                 nn.Upsample(scale_factor=2),
-                nn.Conv2d(prev_filters, cur_filters, 3, 1, 1, bias=True),
+                nn.Conv2d(prev_filters, cur_filters, 3, 1, 1, bias=False),
                 nn.BatchNorm2d(cur_filters),
                 nn.ReLU(True),
             ])
         self.mask_layers.append(nn.Conv2d(cur_filters, 1, 3, 1, 1))
         self.mask_layers = nn.Sequential(*self.mask_layers)
 
-        # score layers
+    def forward(self, input):
+        return self.preproc_layers(input)
+
+    def predict_masks(self, x):
+        assert x.shape == (x.shape[0], self.num_filters, self.conv_size, self.conv_size)
+        return self.mask_layers(x)
+
+
+class ScoreHead(nn.Module):
+    def __init__(self, in_channels, num_scores, num_filters=128):
+        super().__init__()
+        assert FPN.mask_size % 4 == 0
+
         self.score_layers = nn.Sequential(
             nn.Conv2d(in_channels, num_filters, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters),
@@ -51,28 +66,15 @@ class MaskMLP(nn.Module):
         )
 
     def forward(self, input):
-        # x = self.in_layer(input.contiguous())
-        # for layer in self.layers:
-        #     x = torch.cat([x, layer(x)], 1)
-        # x = self.out_layer(x)
-        # mask, score = x.split(FPN.mask_size * FPN.mask_size, 1)
-        # mask, score = mask, score.contiguous()
-        # mask = mask.permute(0, 2, 3, 1)
-        # mask = mask.contiguous().view(mask.shape[0], 1, *mask.shape[1:3], FPN.mask_size, FPN.mask_size)
-
         score = self.score_layers(input)
-        mask = self.mask_layers(input)
-        mask = mask.view(input.shape[0], score.shape[-1], score.shape[-1], *mask.shape[1:])
-        mask = mask.permute(0, 3, 1, 2, 4, 5).contiguous()
-        assert mask.shape == (score.shape[0], 1, *score.shape[2:4], FPN.mask_size, FPN.mask_size), mask.shape
-        return mask, score
+        return score
 
 
 class FPN(nn.Module):
     mask_size = 32
     mask_kernel_size = 4
 
-    def __init__(self, num_scores=1, num_filters=256):
+    def __init__(self, num_scores=1, num_filters=256, num_head_filters=128):
         super().__init__()
 
         assert self.mask_size in (16, 32)
@@ -89,7 +91,8 @@ class FPN(nn.Module):
         self.latlayer2 = nn.Conv2d(512, num_filters, kernel_size=1, stride=1, padding=0)
         self.latlayer3 = nn.Conv2d(256, num_filters, kernel_size=1, stride=1, padding=0)
 
-        self.mask_mlp = MaskMLP(num_filters, num_scores)
+        self.mask_head = MaskHead(num_filters, num_head_filters)
+        self.score_head = ScoreHead(num_filters, num_scores, num_head_filters)
 
     def freeze_pretrained_layers(self, freeze):
         for p in self.resnet.parameters():
@@ -138,9 +141,12 @@ class FPN(nn.Module):
             p5, p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
                               ((p5, ou // 32), (p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
 
-        m5 = self.mask_mlp(p5)
-        m4 = self.mask_mlp(p4)
-        m3 = self.mask_mlp(p3)
-        m2 = self.mask_mlp(p2)
+        m5 = self.mask_head(p5), self.score_head(p5)
+        m4 = self.mask_head(p4), self.score_head(p4)
+        m3 = self.mask_head(p3), self.score_head(p3)
+        m2 = self.mask_head(p2), self.score_head(p2)
 
         return m2, m3, m4, m5
+
+    def predict_masks(self, x):
+        return self.mask_head.predict_masks(x)
