@@ -4,51 +4,67 @@ import torch.nn.functional as F
 from torch import nn
 from torchvision.models.resnet import resnet50, resnet101
 import torch
+from .conv_chunk import ConvChunk2d
 
 
 class MaskMLP(nn.Module):
-    def __init__(self, in_channels, num_scores, nf=64, num_layers=4):
+    def __init__(self, in_channels, num_scores, num_filters=128):
         super().__init__()
+        assert FPN.mask_size % 4 == 0
         self.in_channels = in_channels
         self.num_scores = num_scores
-        self.layers = nn.ModuleList()
-        c_in = in_channels
-        self.in_layer = nn.BatchNorm2d(in_channels)
-        for i in range(num_layers):
-            self.layers.append(nn.Sequential(
-                nn.Conv2d(c_in, nf, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(nf),
+
+        # mask layers
+        self.mask_layers = [
+            nn.Conv2d(in_channels, num_filters, 3, 1, 1, bias=True),
+            # nn.BatchNorm2d(num_filters),
+            nn.ReLU(True),
+            ConvChunk2d(num_filters, 4)
+        ]
+        cur_size = 4
+        cur_filters = num_filters
+        while cur_size != FPN.mask_size:
+            prev_filters = cur_filters
+            cur_filters //= 4
+            cur_size *= 2
+            self.mask_layers.extend([
+                nn.Upsample(scale_factor=2),
+                nn.Conv2d(prev_filters, cur_filters, 3, 1, 1, bias=True),
+                nn.BatchNorm2d(cur_filters),
                 nn.ReLU(True),
-            ))
-            c_in += nf
-        self.out_layer = nn.Sequential(
-            nn.Conv2d(c_in, 1024, FPN.mask_kernel_size, bias=False),
-            nn.Conv2d(1024, FPN.mask_size * FPN.mask_size + num_scores, 1),
+            ])
+        self.mask_layers.append(nn.Conv2d(cur_filters, 1, 3, 1, 1))
+        self.mask_layers = nn.Sequential(*self.mask_layers)
+
+        # score layers
+        self.score_layers = nn.Sequential(
+            nn.Conv2d(in_channels, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters),
+            nn.ReLU(True),
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters),
+            nn.ReLU(True),
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters),
+            nn.ReLU(True),
+            nn.Conv2d(num_filters, num_scores, 4),
         )
-        # self.net = nn.Sequential(
-        #     nn.Conv2d(in_channels, nf, 3, 1, 1, bias=False),
-        #     nn.BatchNorm2d(nf),
-        #     nn.ReLU(True),
-        #     nn.Conv2d(nf, nf, 3, 1, 1, bias=False),
-        #     nn.BatchNorm2d(nf),
-        #     nn.ReLU(True),
-        #     nn.Conv2d(nf, nf, 3, 1, 1, bias=False),
-        #     nn.BatchNorm2d(nf),
-        #     nn.ReLU(True),
-        #     nn.Conv2d(nf, nf, FPN.mask_kernel_size, bias=False),
-        #     nn.Conv2d(nf, FPN.mask_size * FPN.mask_size + num_scores, 1),
-        # )
 
     def forward(self, input):
-        # x = self.net(input)
-        x = self.in_layer(input.contiguous())
-        for layer in self.layers:
-            x = torch.cat([x, layer(x)], 1)
-        x = self.out_layer(x)
-        mask, score = x.split(FPN.mask_size * FPN.mask_size, 1)
-        mask, score = mask, score.contiguous()
-        mask = mask.permute(0, 2, 3, 1)
-        mask = mask.contiguous().view(mask.shape[0], 1, *mask.shape[1:3], FPN.mask_size, FPN.mask_size)
+        # x = self.in_layer(input.contiguous())
+        # for layer in self.layers:
+        #     x = torch.cat([x, layer(x)], 1)
+        # x = self.out_layer(x)
+        # mask, score = x.split(FPN.mask_size * FPN.mask_size, 1)
+        # mask, score = mask, score.contiguous()
+        # mask = mask.permute(0, 2, 3, 1)
+        # mask = mask.contiguous().view(mask.shape[0], 1, *mask.shape[1:3], FPN.mask_size, FPN.mask_size)
+
+        score = self.score_layers(input)
+        mask = self.mask_layers(input)
+        mask = mask.view(input.shape[0], score.shape[-1], score.shape[-1], *mask.shape[1:])
+        mask = mask.permute(0, 3, 1, 2, 4, 5).contiguous()
+        assert mask.shape == (score.shape[0], 1, *score.shape[2:4], FPN.mask_size, FPN.mask_size), mask.shape
         return mask, score
 
 

@@ -56,7 +56,7 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
     # model_disc.apply(weights_init)
 
     # optimizer = torch.optim.SGD(get_param_groups(model), lr=0.05, momentum=0.9, weight_decay=5e-4)
-    optimizer_gen = GAdam(get_param_groups(model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+    optimizer_gen = GAdam(get_param_groups(model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='weight',
                           amsgrad=False, nesterov=0.5, weight_decay=5e-4, norm_weight_decay=False)
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
