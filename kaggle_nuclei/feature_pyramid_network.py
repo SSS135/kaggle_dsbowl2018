@@ -5,6 +5,7 @@ from torch import nn
 from torchvision.models.resnet import resnet50, resnet101
 import torch
 from .conv_chunk import ConvChunk2d
+from .skip_connections import DenseSequential, ResidualSequential
 
 
 class MaskHead(nn.Module):
@@ -17,7 +18,8 @@ class MaskHead(nn.Module):
         self.num_filters = num_filters
 
         self.preproc_layers = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, 3, 1, 1),
+            nn.Conv2d(in_channels, in_channels, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(in_channels),
             nn.ReLU(True),
             nn.Conv2d(in_channels, num_filters, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters),
@@ -28,14 +30,24 @@ class MaskHead(nn.Module):
         cur_filters = num_filters
         while cur_size != FPN.mask_size:
             prev_filters = cur_filters
-            cur_filters //= 4
+            cur_filters //= 2
             cur_size *= 2
-            self.mask_layers.extend([
+            self.mask_layers.append(nn.Sequential(
                 nn.Upsample(scale_factor=2),
-                nn.Conv2d(prev_filters, cur_filters, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(cur_filters),
-                nn.ReLU(True),
-            ])
+                DenseSequential(
+                    nn.Sequential(
+                        nn.Conv2d(prev_filters, cur_filters, 3, 1, 1, bias=False),
+                        nn.BatchNorm2d(cur_filters),
+                        nn.ReLU(True),
+                    ),
+                    nn.Sequential(
+                        nn.Conv2d(prev_filters + cur_filters, cur_filters, 3, 1, 1, bias=False),
+                        nn.BatchNorm2d(cur_filters),
+                        nn.ReLU(True),
+                    )
+                ),
+                nn.Conv2d(prev_filters + cur_filters * 2, cur_filters, 3, 1, 1),
+            ))
         self.mask_layers.append(nn.Conv2d(cur_filters, 1, 3, 1, 1))
         self.mask_layers = nn.Sequential(*self.mask_layers)
 
@@ -53,16 +65,29 @@ class ScoreHead(nn.Module):
         assert FPN.mask_size % 4 == 0
 
         self.score_layers = nn.Sequential(
-            nn.Conv2d(in_channels, num_filters, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters),
-            nn.ReLU(True),
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters),
-            nn.ReLU(True),
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters),
-            nn.ReLU(True),
-            nn.Conv2d(num_filters, num_scores, 4),
+            DenseSequential(
+                nn.Sequential(
+                    nn.Conv2d(in_channels + num_filters * 0, num_filters, 3, 1, 1, bias=False),
+                    nn.BatchNorm2d(num_filters),
+                    nn.ReLU(True),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(in_channels + num_filters * 1, num_filters, 3, 1, 1, bias=False),
+                    nn.BatchNorm2d(num_filters),
+                    nn.ReLU(True),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(in_channels + num_filters * 2, num_filters, 3, 1, 1, bias=False),
+                    nn.BatchNorm2d(num_filters),
+                    nn.ReLU(True),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(in_channels + num_filters * 3, num_filters, 3, 1, 1, bias=False),
+                    nn.BatchNorm2d(num_filters),
+                    nn.ReLU(True),
+                ),
+            ),
+            nn.Conv2d(in_channels + num_filters * 4, num_scores, 4),
         )
 
     def forward(self, input):

@@ -43,7 +43,7 @@ def mse_focal_loss(pred, target, lam=2, reduce=True):
 
 
 def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None):
-    samples_per_image = 256
+    samples_per_image = 1024
 
     dataset = NucleiDataset(train_data)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=4, pin_memory=True)
@@ -409,7 +409,7 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
         return None
 
     pos_centers, pos_centers_perm = upscaled_indexes(pos_centers_fmap, max_pos_samples_count)
-    neg_centers, neg_centers_perm = upscaled_indexes(neg_centers_fmap, len(pos_centers) * neg_to_pos_ratio)
+    neg_centers, neg_centers_perm = upscaled_indexes(neg_centers_fmap, 1024 * 1024)
 
     pos_centers_fmap_idx = pos_centers_fmap.view(-1).nonzero().squeeze()
     neg_centers_fmap_idx = neg_centers_fmap.view(-1).nonzero().squeeze()
