@@ -7,26 +7,44 @@ import torch
 
 
 class MaskMLP(nn.Module):
-    def __init__(self, in_channels, num_scores, nf=256):
+    def __init__(self, in_channels, num_scores, nf=64, num_layers=4):
         super().__init__()
         self.in_channels = in_channels
         self.num_scores = num_scores
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, nf, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(nf),
-            nn.ReLU(True),
-            nn.Conv2d(nf, nf, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(nf),
-            nn.ReLU(True),
-            nn.Conv2d(nf, nf, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(nf),
-            nn.ReLU(True),
-            nn.Conv2d(nf, nf, FPN.mask_kernel_size, bias=False),
-            nn.Conv2d(nf, FPN.mask_size * FPN.mask_size + num_scores, 1),
+        self.layers = nn.ModuleList()
+        c_in = in_channels
+        self.in_layer = nn.BatchNorm2d(in_channels)
+        for i in range(num_layers):
+            self.layers.append(nn.Sequential(
+                nn.Conv2d(c_in, nf, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(nf),
+                nn.ReLU(True),
+            ))
+            c_in += nf
+        self.out_layer = nn.Sequential(
+            nn.Conv2d(c_in, 1024, FPN.mask_kernel_size, bias=False),
+            nn.Conv2d(1024, FPN.mask_size * FPN.mask_size + num_scores, 1),
         )
+        # self.net = nn.Sequential(
+        #     nn.Conv2d(in_channels, nf, 3, 1, 1, bias=False),
+        #     nn.BatchNorm2d(nf),
+        #     nn.ReLU(True),
+        #     nn.Conv2d(nf, nf, 3, 1, 1, bias=False),
+        #     nn.BatchNorm2d(nf),
+        #     nn.ReLU(True),
+        #     nn.Conv2d(nf, nf, 3, 1, 1, bias=False),
+        #     nn.BatchNorm2d(nf),
+        #     nn.ReLU(True),
+        #     nn.Conv2d(nf, nf, FPN.mask_kernel_size, bias=False),
+        #     nn.Conv2d(nf, FPN.mask_size * FPN.mask_size + num_scores, 1),
+        # )
 
     def forward(self, input):
-        x = self.net(input)
+        # x = self.net(input)
+        x = self.in_layer(input.contiguous())
+        for layer in self.layers:
+            x = torch.cat([x, layer(x)], 1)
+        x = self.out_layer(x)
         mask, score = x.split(FPN.mask_size * FPN.mask_size, 1)
         mask, score = mask, score.contiguous()
         mask = mask.permute(0, 2, 3, 1)
@@ -35,12 +53,14 @@ class MaskMLP(nn.Module):
 
 
 class FPN(nn.Module):
-    mask_size = 16
+    mask_size = 32
     mask_kernel_size = 4
 
     def __init__(self, num_scores=1, num_filters=256):
         super().__init__()
 
+        assert self.mask_size in (16, 32)
+        assert self.mask_kernel_size == 4
         self.mask_pixel_sizes = (1, 2, 4, 8) if self.mask_size == 16 else (0.5, 1, 2, 4)
         self.mask_strides = (4, 8, 16, 32)
         self.resnet = resnet50(True)

@@ -56,8 +56,8 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
     # model_disc.apply(weights_init)
 
     # optimizer = torch.optim.SGD(get_param_groups(model), lr=0.05, momentum=0.9, weight_decay=5e-4)
-    optimizer_gen = GAdam(get_param_groups(model_gen), lr=5e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
-                          amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
+    optimizer_gen = GAdam(get_param_groups(model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+                          amsgrad=False, nesterov=0.5, weight_decay=5e-4, norm_weight_decay=False)
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
@@ -172,7 +172,7 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
                 f_iou_ma = 0.99 * f_iou_ma + 0.01 * f_iou.mean()
                 t_iou_ma = 0.99 * t_iou_ma + 0.01 * t_iou.mean()
                 pbar.set_postfix(E=epoch, SF=score_fscore_ma / bc, IoU=f_iou_ma / bc, IoU_T=t_iou_ma / bc,
-                                 MPI=np.round(batch_masks / (i + 1) / img.shape[0], 2), refresh=False)
+                                 MPS=np.round(batch_masks / (i + 1) / img.shape[0], 2), refresh=False)
 
             score = t_iou_ma
             if t_iou_ma > best_score:
@@ -294,12 +294,10 @@ def resample_data(labels, sdf, box_mask, img, pixel_sizes):
         if px_size == 1:
             res_labels, res_sdf, res_boxes, res_img = labels, sdf, box_mask, img
         elif px_size < 1:
-            raise NotImplementedError
             assert round(1 / px_size, 3) == int(1 / px_size)
             factor = int(1 / px_size)
             res_labels = F.upsample(labels.view(1, 1, *labels.shape).float(), scale_factor=factor).data[0, 0].long()
-            res_boxes = F.upsample(box_mask.unsqueeze(0), scale_factor=factor).data[0, 0]
-            res_boxes = res_boxes / px_size
+            res_boxes = F.upsample(box_mask.unsqueeze(0), scale_factor=factor).data[0] / px_size
             res_sdf = F.upsample(sdf.view(1, 1, *sdf.shape), scale_factor=factor, mode='bilinear').data[0, 0]
             res_img = F.upsample(img.unsqueeze(0), scale_factor=factor, mode='bilinear').data[0]
         else:
