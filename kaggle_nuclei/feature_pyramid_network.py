@@ -35,7 +35,7 @@ class MaskMLP(nn.Module):
 
 
 class FPN(nn.Module):
-    mask_size = 32
+    mask_size = 16
     mask_kernel_size = 4
 
     def __init__(self, num_scores=1, num_filters=256):
