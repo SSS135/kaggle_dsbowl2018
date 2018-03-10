@@ -10,6 +10,8 @@ from torch.autograd import Variable
 from tqdm import tqdm
 from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
 from .feature_pyramid_network import FPN
+from .preprocessor_rpn_training import center_crop, mask_to_indexes
+from .feature_pyramid_network import MaskHead
 
 
 mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
@@ -78,7 +80,7 @@ def extract_proposals_from_image(model, img, scale=1, score_threshold=0.8, pad_o
 
     out_layers = model(Variable(x, volatile=True), train_pad)
     real_scale = s_shape / np.array(img.shape[:2])
-    preds = [extract_proposals_from_layer(ly, psz, str, real_scale, score_threshold)
+    preds = [extract_proposals_from_layer(model, ly, psz, str, real_scale, score_threshold)
              for ly, psz, str in zip(out_layers, model.mask_pixel_sizes, model.mask_strides)]
     preds = [p for p in preds if p is not None]
     preds = [(m, s, (p - np.array(pad_offset) - border_pad) / real_scale)
@@ -87,20 +89,23 @@ def extract_proposals_from_image(model, img, scale=1, score_threshold=0.8, pad_o
     return preds
 
 
-def extract_proposals_from_layer(layer, pixel_size, stride, scale, sigmoid_score_threshold):
-    masks, scores = [x.data for x in layer]
+def extract_proposals_from_layer(model, layer, pixel_size, stride, scale, sigmoid_score_threshold):
+    masks, scores = layer[0][0], layer[1].data[0, 0]
     logit_score_threshold = logit(sigmoid_score_threshold)
-    good_idx = (scores > logit_score_threshold).view(-1).nonzero().squeeze()
+    good_score_mask = scores > logit_score_threshold
+    good_idx = good_score_mask.view(-1).nonzero().squeeze()
     if len(good_idx) == 0:
         return None
-    good_masks = masks.view(-1, *masks.shape[-2:]).index_select(0, good_idx)
-    good_masks = Variable(good_masks.unsqueeze(1), volatile=True)
-    size = (np.array(masks.shape[-2:]) * pixel_size / scale).round().astype(int)
+    good_masks = center_crop(masks, good_idx, (0, MaskHead.conv_size), scores.shape[-1])
+    good_masks = model.predict_masks(good_masks)
+    size = (np.array(good_masks.shape[-2:]) * pixel_size / scale).round().astype(int)
     size = size[0].item(), size[1].item()
     good_masks = F.upsample(good_masks, size, mode='bilinear').data.squeeze(1)
     good_scores = scores.view(-1)[good_idx]
-    good_positions = torch.stack([good_idx / masks.shape[-3], good_idx % masks.shape[-3]], 1)
-    good_positions = good_positions * stride
+    good_positions = good_score_mask.nonzero() * stride #+ round(FPN.mask_size // 2 * pixel_size)
+    # good_positions = mask_to_indexes(good_score_mask, stride, FPN.mask_size // 2 * pixel_size, image_size)
+    # good_positions = torch.stack([good_idx / scores.shape[-1], good_idx % scores.shape[-2]], 1)
+    # good_positions = good_positions * stride
     return good_masks.cpu().numpy(), good_scores.cpu().numpy(), good_positions.cpu().numpy()
 
 

@@ -56,8 +56,8 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
     # model_disc.apply(weights_init)
 
     # optimizer = torch.optim.SGD(get_param_groups(model), lr=0.05, momentum=0.9, weight_decay=5e-4)
-    optimizer_gen = GAdam(get_param_groups(model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='weight',
-                          amsgrad=False, nesterov=0.5, weight_decay=5e-4, norm_weight_decay=False)
+    optimizer_gen = GAdam(get_param_groups(model_gen), lr=5e-4, betas=(0.9, 0.999), avg_sq_mode='weight',
+                          amsgrad=True, nesterov=0.5, weight_decay=5e-4)
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
@@ -338,6 +338,49 @@ def downscale_nonzero(x, factor):
     return gx
 
 
+def center_crop(image, centers, border, centers_img_size):
+    """
+    Make several crops of image
+    Args:
+        image: Cropped image. Can have any nuber of channels, only last two are used for cropping.
+        centers: 1d indexes of crop centers.
+        border: tuple of (left-top, right-bottom) offsets from `centers`.
+        centers_img_size: Size of image used to convert centers from 1d to 2d format.
+
+    Returns: Tensor with crops [num crops, ..., crop size, crop size]
+
+    """
+    # get 2d indexes of `centers`
+    centers_y = centers / centers_img_size
+    centers_x = centers - centers_y * centers_img_size
+    centers = torch.stack([centers_y, centers_x], 1).cpu()
+    assert centers.shape == (centers_x.shape[0], 2), centers.shape
+    # crop `image` in +-border range from centers
+    crops = []
+    for c in centers:
+        crop = image[..., c[0] + border[0]: c[0] + border[1], c[1] + border[0]: c[1] + border[1]]
+        crops.append(crop)
+    return torch.stack(crops, 0)
+
+
+def mask_to_indexes(mask, stride, border, size):
+    """
+    Convert binary mask to indexes and upscale them
+    Args:
+        mask: Binary mask
+        stride: Stride between mask cells
+        border: Mask padding
+        size: Size of upscaled image
+
+    Returns: 1d indexes
+
+    """
+    # convert `mask` from binary mask to 2d indexes and upscale them from conv-center space to image space
+    idx = mask.nonzero() * stride + border
+    # convert to flat indexes
+    return idx[:, 0] * size + idx[:, 1]
+
+
 def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, img,
                                max_pos_samples_count, neg_to_pos_ratio,
                                pos_sdf_threshold, neg_sdf_threshold,
@@ -347,27 +390,11 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
     stride = FPN.mask_size // FPN.mask_kernel_size
 
     def upscaled_indexes(mask, max_count):
-        # convert `mask` from binary mask to 2d indexes and upscale them from conv-center space to image space
-        idx = mask.nonzero() * stride + border
+        idx = mask_to_indexes(mask, stride, border, labels.shape[-1])
         # shuffle indexes and select no more than `max_count`
         perm = torch.randperm(len(idx))[:max_count].type_as(idx)
         idx = idx[perm]
-        # convert to flat indexes
-        idx = idx[:, 0] * labels.shape[-1] + idx[:, 1]
         return idx, perm
-
-    def center_crop(image, centers, border=(-border, border), raw_size=labels.shape[-1]):
-        # get 2d indexes of `centers`
-        centers_y = centers / raw_size
-        centers_x = centers - centers_y * raw_size
-        centers = torch.stack([centers_y, centers_x], 1).cpu()
-        assert centers.shape == (centers_x.shape[0], 2), centers.shape
-        # crop `image` in +-border range from centers
-        crops = []
-        for c in centers:
-            crop = image[..., c[0] + border[0]: c[0] + border[1], c[1] + border[0]: c[1] + border[1]]
-            crops.append(crop)
-        return torch.stack(crops, 0)
 
     # slice to select values from image at conv center locations
     mask_centers_slice = (
@@ -422,13 +449,12 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
     target_scores = out_scores.data.new(pred_scores.shape[0]).fill_(0)
     target_scores[:pred_pos_scores.shape[0]] = 1
 
-    label_crops = center_crop(labels, pos_centers)
+    label_crops = center_crop(labels, pos_centers, (-border, border), labels.shape[-1])
     pos_center_label_nums = labels.take(pos_centers)
     target_masks = label_crops == pos_center_label_nums.view(-1, 1, 1)
-    # pred_masks = out_masks.view(-1, FPN.mask_size, FPN.mask_size).index_select(0, Variable(pred_pos_scores_idx))
     # [num masks, conv channels, conv size, conv size]
     pred_masks = center_crop(out_masks, pred_pos_scores_idx, (0, MaskHead.conv_size), pos_centers_fmap.shape[0])
-    img_crops = center_crop(img, pos_centers)
+    img_crops = center_crop(img, pos_centers, (-border, border), labels.shape[-1])
 
     return pred_masks, target_masks, pred_scores, target_scores, img_crops
 

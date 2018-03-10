@@ -95,6 +95,17 @@ class ScoreHead(nn.Module):
         return score
 
 
+class LateralLayer(nn.Module):
+    def __init__(self, num_filters, num_layers):
+        super().__init__()
+        self.latlayer1 = nn.Conv2d(num_filters, num_filters, kernel_size=1, stride=1, padding=0)
+        self.latlayer2 = nn.Conv2d(512, num_filters, kernel_size=1, stride=1, padding=0)
+        self.latlayer3 = nn.Conv2d(256, num_filters, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, input_layers):
+        pass
+
+
 class FPN(nn.Module):
     mask_size = 32
     mask_kernel_size = 4
@@ -106,7 +117,7 @@ class FPN(nn.Module):
         assert self.mask_kernel_size == 4
         self.mask_pixel_sizes = (1, 2, 4, 8) if self.mask_size == 16 else (0.5, 1, 2, 4)
         self.mask_strides = (4, 8, 16, 32)
-        self.resnet = resnet50(True)
+        self.resnet = resnet101(True)
 
         # Top layer
         self.toplayer = nn.Conv2d(2048, num_filters, kernel_size=1, stride=1, padding=0)  # Reduce channels
