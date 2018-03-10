@@ -43,8 +43,6 @@ def mse_focal_loss(pred, target, lam=2, reduce=True):
 
 
 def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None):
-    samples_per_image = 1024
-
     dataset = NucleiDataset(train_data)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=4, pin_memory=True)
 
@@ -88,7 +86,7 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
 
                 model_out = model_gen(x_train, pad)
                 train_pairs = get_train_pairs(
-                    labels, sdf, img[:, :, pad:-pad, pad:-pad], model_out, model_gen.mask_pixel_sizes, samples_per_image)
+                    labels, sdf, img[:, :, pad:-pad, pad:-pad], model_out, model_gen.mask_pixel_sizes)
 
                 if train_pairs is None:
                     continue
@@ -184,15 +182,15 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
 
 
 def get_train_pairs(
-        labels, sdf, img, net_out, pixel_sizes, samples_count,
-        neg_to_pos_ratio=3, pos_sdf_threshold=0.2, neg_sdf_threshold=-0.3,
-        pos_size_limits=(0.4, 0.85), neg_size_limits=(0.2, 1.2)):
+        labels, sdf, img, net_out, pixel_sizes,
+        pos_sdf_threshold=0.2, neg_sdf_threshold=-0.3,
+        pos_size_limits=(0.4, 0.9), neg_size_limits=(0.2, 1.2)):
     outputs = []
     for sample_idx in range(labels.shape[0]):
         net_out_sample = [(m[sample_idx], s[sample_idx, 0]) for m, s in net_out]
         o = get_train_pairs_single(
             labels[sample_idx, 0], sdf[sample_idx, 0], img[sample_idx], net_out_sample,
-            pixel_sizes, samples_count, neg_to_pos_ratio, pos_sdf_threshold, neg_sdf_threshold,
+            pixel_sizes, pos_sdf_threshold, neg_sdf_threshold,
             pos_size_limits, neg_size_limits
         )
         outputs.extend(o)
@@ -206,8 +204,8 @@ def get_train_pairs(
     return pred_masks, target_masks.unsqueeze(1).float(), pred_scores, target_scores, img_crops, layer_idx
 
 
-def get_train_pairs_single(labels, sdf, img, net_out, pixel_sizes, samples_count,
-                           neg_to_pos_ratio, pos_sdf_threshold, neg_sdf_threshold,
+def get_train_pairs_single(labels, sdf, img, net_out, pixel_sizes,
+                           pos_sdf_threshold, neg_sdf_threshold,
                            pos_size_limits, neg_size_limits):
     box_mask = get_object_boxes(labels)
     resampled_layers = resample_data(labels, sdf, box_mask, img, pixel_sizes)
@@ -215,14 +213,8 @@ def get_train_pairs_single(labels, sdf, img, net_out, pixel_sizes, samples_count
     for layer_idx, layer_data in enumerate(zip(net_out, resampled_layers)):
         (out_masks, out_scores), (res_labels, res_sdf, res_boxes, res_img) = layer_data
 
-        num_samples_left = samples_count - len(outputs)
-        num_layers_left = len(net_out) - layer_idx
-        num_layer_total_samples = round(num_samples_left / num_layers_left)
-        num_layer_pos_samples = math.ceil(num_layer_total_samples / (neg_to_pos_ratio + 1))
-
         o = generate_samples_for_layer(
             out_masks, out_scores, res_labels, res_sdf, res_boxes, res_img,
-            num_layer_pos_samples, neg_to_pos_ratio,
             pos_sdf_threshold, neg_sdf_threshold,
             pos_size_limits, neg_size_limits
         )
@@ -382,19 +374,11 @@ def mask_to_indexes(mask, stride, border, size):
 
 
 def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, img,
-                               max_pos_samples_count, neg_to_pos_ratio,
                                pos_sdf_threshold, neg_sdf_threshold,
                                pos_size_limits, neg_size_limits):
     # border and stride for converting between image space and conv-center space
     border = FPN.mask_size // 2
     stride = FPN.mask_size // FPN.mask_kernel_size
-
-    def upscaled_indexes(mask, max_count):
-        idx = mask_to_indexes(mask, stride, border, labels.shape[-1])
-        # shuffle indexes and select no more than `max_count`
-        perm = torch.randperm(len(idx))[:max_count].type_as(idx)
-        idx = idx[perm]
-        return idx, perm
 
     # slice to select values from image at conv center locations
     mask_centers_slice = (
@@ -435,15 +419,12 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
     if pos_centers_fmap.sum() == 0 or neg_centers_fmap.sum() == 0:
         return None
 
-    pos_centers, pos_centers_perm = upscaled_indexes(pos_centers_fmap, max_pos_samples_count)
-    neg_centers, neg_centers_perm = upscaled_indexes(neg_centers_fmap, 1024 * 1024)
+    pos_centers = mask_to_indexes(pos_centers_fmap, stride, border, labels.shape[-1])
 
     pos_centers_fmap_idx = pos_centers_fmap.view(-1).nonzero().squeeze()
     neg_centers_fmap_idx = neg_centers_fmap.view(-1).nonzero().squeeze()
-    pred_pos_scores_idx = pos_centers_fmap_idx[pos_centers_perm]
-    pred_neg_scores_idx = neg_centers_fmap_idx[neg_centers_perm]
-    pred_pos_scores = out_scores.take(Variable(pred_pos_scores_idx))
-    pred_neg_scores = out_scores.take(Variable(pred_neg_scores_idx))
+    pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx))
+    pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx))
 
     pred_scores = torch.cat([pred_pos_scores, pred_neg_scores])
     target_scores = out_scores.data.new(pred_scores.shape[0]).fill_(0)
@@ -453,7 +434,7 @@ def generate_samples_for_layer(out_masks, out_scores, labels, sdf, obj_boxes, im
     pos_center_label_nums = labels.take(pos_centers)
     target_masks = label_crops == pos_center_label_nums.view(-1, 1, 1)
     # [num masks, conv channels, conv size, conv size]
-    pred_masks = center_crop(out_masks, pred_pos_scores_idx, (0, MaskHead.conv_size), pos_centers_fmap.shape[0])
+    pred_masks = center_crop(out_masks, pos_centers_fmap_idx, (0, MaskHead.conv_size), pos_centers_fmap.shape[0])
     img_crops = center_crop(img, pos_centers, (-border, border), labels.shape[-1])
 
     return pred_masks, target_masks, pred_scores, target_scores, img_crops

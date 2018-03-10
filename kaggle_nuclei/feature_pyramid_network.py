@@ -95,15 +95,41 @@ class ScoreHead(nn.Module):
         return score
 
 
-class LateralLayer(nn.Module):
-    def __init__(self, num_filters, num_layers):
+class VerticalLayer(nn.Module):
+    def __init__(self, num_filters):
         super().__init__()
-        self.latlayer1 = nn.Conv2d(num_filters, num_filters, kernel_size=1, stride=1, padding=0)
-        self.latlayer2 = nn.Conv2d(512, num_filters, kernel_size=1, stride=1, padding=0)
-        self.latlayer3 = nn.Conv2d(256, num_filters, kernel_size=1, stride=1, padding=0)
+        self.net = nn.Sequential(
+            nn.BatchNorm2d(num_filters * 2),
+            nn.ReLU(True),
+            nn.Conv2d(num_filters * 2, num_filters, 3, 1, 1, bias=False),
+        )
 
     def forward(self, input_layers):
-        pass
+        x = input_layers[0]
+        output_layers = [x]
+        for input in input_layers[1:]:
+            if x.shape[-1] // 2 == input.shape[-1]:
+                x = F.max_pool2d(x, 3, 2, 1)
+            elif x.shape[-1] * 2 == input.shape[-1]:
+                x = F.upsample(x, scale_factor=2)
+            elif x.shape[-1] != input.shape[-1]:
+                raise ValueError((x.shape, input.shape))
+            input = torch.cat([input, x], 1)
+            x = self.net(input)
+            output_layers.append(x)
+        return output_layers
+
+
+class BidirectionalLayer(nn.Module):
+    def __init__(self, num_filters):
+        super().__init__()
+        self.bottom_up = VerticalLayer(num_filters)
+        self.top_down = VerticalLayer(num_filters)
+
+    def forward(self, input_layers):
+        bottom_up = self.bottom_up(input_layers)
+        top_down = self.top_down(input_layers[::-1])[::-1]
+        return [a + b + c for a, b, c in zip(input_layers, top_down, bottom_up)]
 
 
 class FPN(nn.Module):
@@ -126,6 +152,14 @@ class FPN(nn.Module):
         self.latlayer1 = nn.Conv2d(1024, num_filters, kernel_size=1, stride=1, padding=0)
         self.latlayer2 = nn.Conv2d(512, num_filters, kernel_size=1, stride=1, padding=0)
         self.latlayer3 = nn.Conv2d(256, num_filters, kernel_size=1, stride=1, padding=0)
+        self.latlayer4 = nn.Conv2d(64, num_filters, kernel_size=1, stride=1, padding=0)
+
+        self.bidir = nn.Sequential(
+            BidirectionalLayer(num_filters),
+            BidirectionalLayer(num_filters),
+            BidirectionalLayer(num_filters),
+            BidirectionalLayer(num_filters),
+        )
 
         self.mask_head = MaskHead(num_filters, num_head_filters)
         self.score_head = ScoreHead(num_filters, num_scores, num_head_filters)
@@ -133,26 +167,6 @@ class FPN(nn.Module):
     def freeze_pretrained_layers(self, freeze):
         for p in self.resnet.parameters():
             p.requires_grad = not freeze
-
-    def _upsample_add(self, x, y):
-        '''Upsample and add two feature maps.
-        Args:
-          x: (Variable) top feature map to be upsampled.
-          y: (Variable) lateral feature map.
-        Returns:
-          (Variable) added feature map.
-        Note in PyTorch, when input size is odd, the upsampled feature map
-        with `F.upsample(..., scale_factor=2, mode='nearest')`
-        maybe not equal to the lateral feature map size.
-        e.g.
-        original input size: [N,_,15,15] ->
-        conv2d feature map size: [N,_,8,8] ->
-        upsampled feature map size: [N,_,16,16]
-        So we choose bilinear upsample which supports arbitrary output sizes.
-        '''
-        assert y.shape[2] % x.shape[2] == 0 and y.shape[3] % x.shape[3] == 0
-        _, _, H, W = y.shape
-        return F.upsample(x, size=(H, W), mode='bilinear') + y
 
     def forward(self, x, output_unpadding=0):
         c1 = self.resnet.conv1(x)
@@ -167,9 +181,12 @@ class FPN(nn.Module):
 
         # Top-down
         p5 = self.toplayer(c5)
-        p4 = self._upsample_add(p5, self.latlayer1(c4))
-        p3 = self._upsample_add(p4, self.latlayer2(c3))
-        p2 = self._upsample_add(p3, self.latlayer3(c2))
+        p4 = self.latlayer1(c4)
+        p3 = self.latlayer2(c3)
+        p2 = self.latlayer3(c2)
+        p1 = self.latlayer4(c1)
+
+        p1, p2, p3, p4, p5 = self.bidir((p1, p2, p3, p4, p5))
 
         if output_unpadding != 0:
             assert output_unpadding % 32 == 0
