@@ -169,12 +169,12 @@ def remove_missized_objects(mask, min_size, max_size):
 
 # custom weights initialization called on netG and netD
 def weights_init(m):
-    if isinstance(m, _ConvNd) or isinstance(m, nn.Linear):
-        # m.weight.data.normal_(0.0, 0.02)
-        if m.bias is not None:
-            m.bias.data.fill_(0)
-    elif isinstance(m, _BatchNorm):
-        m.weight.data.normal_(1.0, 0.02)
+    # if isinstance(m, _ConvNd) or isinstance(m, nn.Linear):
+    #     # m.weight.data.normal_(0.0, 0.02)
+    #     if m.bias is not None:
+    #         m.bias.data.fill_(0)
+    if isinstance(m, _BatchNorm):
+        m.weight.data.normal_(1.0, 0.05)
         m.bias.data.fill_(0)
 
 

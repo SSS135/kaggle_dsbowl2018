@@ -47,8 +47,8 @@ class NucleiDataset(Dataset):
             self.datas = data
 
         crop_conf = dict(
-            size=train_size + train_pad * 2, padding=train_pad, rotation=[(0, 360)],
-            scale=(0.5, 3), horizontal_flip=True, vertical_flip=True)
+            size=train_size + train_pad * 2, padding=train_pad, rotation={0, 90},
+            scale=(0.5, 2), horizontal_flip=True, vertical_flip=True)
 
         self.source_transform = tsf.Compose([
             RandomAffineCrop(pad_mode='median', **crop_conf),

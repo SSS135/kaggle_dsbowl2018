@@ -12,11 +12,11 @@ class DoubleConv(nn.Module):
         super(DoubleConv, self).__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            nn.InstanceNorm2d(out_ch, affine=True),
             nn.ReLU(inplace=True),
             # nn.Dropout2d(0.2),
             nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            nn.InstanceNorm2d(out_ch, affine=True),
             nn.ReLU(inplace=True)
         )
 
@@ -83,15 +83,14 @@ class OutConv(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, n_classes, mid_noise_channels=0, f=64):
+    def __init__(self, n_channels, n_classes, f=64):
         super(UNet, self).__init__()
-        self.mid_noise_channels = mid_noise_channels
         self.inc = InConv(n_channels, f)
         self.down1 = Down(f, 2 * f)
         self.down2 = Down(2 * f, 4 * f)
         self.down3 = Down(4 * f, 8 * f)
         self.down4 = Down(8 * f, 8 * f)
-        self.up1 = Up(mid_noise_channels + 16 * f, 4 * f)
+        self.up1 = Up(16 * f, 4 * f)
         self.up2 = Up(8 * f, 2 * f)
         self.up3 = Up(4 * f, f)
         self.up4 = Up(2 * f, f)
@@ -103,16 +102,9 @@ class UNet(nn.Module):
         c3 = self.down2(c2)
         c4 = self.down3(c3)
         c5 = self.down4(c4)
-        if self.mid_noise_channels != 0:
-            noise = x.data.new(x.shape[0], self.mid_noise_channels, *c5.shape[2:]).random_(0, 1)
-            c5 = torch.cat([c5, Variable(noise)], 1)
         x = self.up1(c5, c4)
-        del c5, c4
         x = self.up2(x, c3)
-        del c3
         x = self.up3(x, c2)
-        del c2
         x = self.up4(x, c1)
-        del c1
         x = self.outc(x)
         return x

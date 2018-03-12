@@ -9,9 +9,7 @@ from skimage.transform import resize
 from torch.autograd import Variable
 from tqdm import tqdm
 from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
-from .feature_pyramid_network import FPN
 from .preprocessor_rpn_training import center_crop, mask_to_indexes
-from .feature_pyramid_network import MaskHead
 
 
 mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
@@ -48,6 +46,10 @@ def predict_rpn(model, raw_data, stride=4, max_stride=32, max_scale=1, tested_sc
     return results
 
 
+def masked_non_max_suppression(img, labels):
+    pass
+
+
 def extract_strided_proposals_from_image(model, img, scale=1, score_threshold=0.8,
                                          stride_start=-15, stride_end=16, stride=5):
     proposals = []
@@ -78,7 +80,7 @@ def extract_proposals_from_image(model, img, scale=1, score_threshold=0.8, pad_o
     # noise = x.new(1, 1, *x.shape[2:]).normal_(0, 1)
     # x = torch.cat([x, noise], 1)
 
-    out_layers = model(Variable(x, volatile=True), train_pad)
+    out_layers, out_img = model(Variable(x, volatile=True), train_pad)
     real_scale = s_shape / np.array(img.shape[:2])
     preds = [extract_proposals_from_layer(model, ly, psz, str, real_scale, score_threshold)
              for ly, psz, str in zip(out_layers, model.mask_pixel_sizes, model.mask_strides)]
@@ -96,7 +98,7 @@ def extract_proposals_from_layer(model, layer, pixel_size, stride, scale, sigmoi
     good_idx = good_score_mask.view(-1).nonzero().squeeze()
     if len(good_idx) == 0:
         return None
-    good_masks = center_crop(masks, good_idx, (0, MaskHead.conv_size), scores.shape[-1])
+    good_masks = center_crop(masks, good_idx, (0, model.conv_size), scores.shape[-1])
     good_masks = model.predict_masks(good_masks)
     size = (np.array(good_masks.shape[-2:]) * pixel_size / scale).round().astype(int)
     size = size[0].item(), size[1].item()
