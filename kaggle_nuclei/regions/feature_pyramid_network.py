@@ -144,25 +144,23 @@ class VerticalLayerSimple(nn.Module):
             # nn.BatchNorm2d(num_filters),
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.Conv2d(num_filters, num_filters * 2, 3, 1, 1, bias=False),
         )
 
     def forward(self, input_layers):
         output_layers = []
+        cx = Variable(input_layers[0].data.new(input_layers[0].shape).zero_())
         for input in input_layers:
-            if len(output_layers) == 0:
-                x = Variable(input.data.new(input.shape).zero_())
-            else:
-                x = output_layers[-1]
-                if x.shape[-1] // 2 == input.shape[-1]:
-                    x = F.max_pool2d(x, 3, 2, 1)
-                elif x.shape[-1] * 2 == input.shape[-1]:
-                    x = F.upsample(x, scale_factor=2)
-                elif x.shape[-1] != input.shape[-1]:
-                    raise ValueError((x.shape, input.shape))
-            input = torch.cat([input, x], 1)
-            x = self.net(input)
-            output_layers.append(x)
+            if cx.shape[-1] // 2 == input.shape[-1]:
+                cx = F.max_pool2d(cx, 3, 2, 1)
+            elif cx.shape[-1] * 2 == input.shape[-1]:
+                cx = F.upsample(cx, scale_factor=2)
+            elif cx.shape[-1] != input.shape[-1]:
+                raise ValueError((cx.shape, input.shape))
+            input = torch.cat([input, cx], 1)
+            cx_new, hx = self.net(input).chunk(2, 1)
+            cx += cx_new
+            output_layers.append(hx)
         return output_layers
 
 

@@ -10,8 +10,9 @@ from tqdm import tqdm
 
 from ..dataset import resnet_norm_mean, resnet_norm_std, train_pad
 from .training import center_crop
+import itertools
+import torchvision.transforms as tsf
 
-mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
 img_size_div = 32
 border_pad = 64
 total_pad = train_pad + border_pad
@@ -45,38 +46,50 @@ def predict(model, raw_data, stride=4, max_stride=32, max_scale=1, tested_scales
     return results
 
 
-def masked_non_max_suppression(img, proposals, mask_threshold=0, max_allowed_intersection=0.2):
-    labels = torch.LongTensor(*img.shape[1:]).zero_()
+def masked_non_max_suppression(img_shape, proposals, mask_threshold=0, max_allowed_intersection=0.2):
+    labels = np.zeros(img_shape, dtype=int)
+    used_proposals = []
     proposals = sorted(proposals, key=lambda x: -x[1])
     cur_obj_index = 1
-    for mask, _, pos in proposals:
+    for mask, score, pos in proposals:
+        pos = pos.round().astype(int)
         bounds_label = np.array([pos[0], pos[0] + mask.shape[0], pos[1], pos[1] + mask.shape[1]])
         bounds_label_clip = bounds_label.copy()
         bounds_label_clip[:2] = bounds_label[:2].clip(0, labels.shape[0])
         bounds_label_clip[2:] = bounds_label[2:].clip(0, labels.shape[1])
-        bounds_mask_clip = bounds_label_clip - bounds_label
+        bounds_mask_clip = bounds_label_clip - bounds_label + np.array([0, mask.shape[0], 0, mask.shape[1]])
         bounds_label_clip, bounds_mask_clip = bounds_label_clip.tolist(), bounds_mask_clip.tolist()
 
         label_crop = labels[bounds_label_clip[0]:bounds_label_clip[1], bounds_label_clip[2]:bounds_label_clip[3]]
         mask_crop = mask[bounds_mask_clip[0]:bounds_mask_clip[1], bounds_mask_clip[2]:bounds_mask_clip[3]]
         label_crop_mask, mask_crop_mask = label_crop > 0, mask_crop > mask_threshold
 
+        # print(labels.shape, mask.shape, bounds_label, pos)
+        # print(bounds_mask_clip, bounds_label_clip)
+
         intersection_area = (label_crop_mask & mask_crop_mask).sum()
         mask_area = mask_crop_mask.sum()
-        if intersection_area > mask_area * max_allowed_intersection:
+        if mask_area == 0 or intersection_area > mask_area * max_allowed_intersection:
             continue
+        used_proposals.append((mask, score, pos))
         label_crop[(label_crop_mask == 0) & (mask_crop_mask != 0)] = cur_obj_index
         cur_obj_index += 1
-    return labels
+    return labels, used_proposals
 
 
-def extract_strided_proposals_from_image(model, img, scale=1, score_threshold=0.8,
+def extract_strided_proposals_from_image(model, img, score_threshold=0.8,
+                                         max_scale=1, tested_scales=1,
                                          stride_start=-15, stride_end=16, stride=5):
+    max_scale = math.log10(max_scale)
+    scales = np.logspace(-max_scale, max_scale, num=tested_scales)
     proposals = []
-    for offset_y in range(stride_start, stride_end, stride):
-        for offset_x in range(stride_start, stride_end, stride):
-            new = extract_proposals_from_image(model, img, scale, score_threshold, (offset_y, offset_x))
-            proposals.extend(new)
+    combs = itertools.product(
+        range(stride_start, stride_end, stride),
+        range(stride_start, stride_end, stride),
+        scales)
+    for (offset_y, offset_x, scale) in combs:
+        new = extract_proposals_from_image(model, img, scale, score_threshold, (offset_y, offset_x))
+        proposals.extend(new)
     return proposals
 
 
@@ -92,10 +105,11 @@ def extract_proposals_from_image(model, img, scale=1, score_threshold=0.8, pad_o
     padding = (total_pad + pad_offset[0], total_pad - pad_offset[0]), \
               (total_pad + pad_offset[1], total_pad - pad_offset[1]), \
               (0, 0)
-    x = np.pad(x, padding, mode='reflect')
+    x = np.pad(x, padding, mode='median')
     x = x.transpose(2, 0, 1)
-    x = torch.from_numpy(x).unsqueeze(0).cuda()
-    x = (x - mean_std_sub[0].view(1, -1, 1, 1)) / mean_std_sub[1].view(1, -1, 1, 1)
+    x = torch.from_numpy(x).cuda()
+    x = tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std)(x)
+    x = x.unsqueeze(0)
     # x = flips[flip_type](x)
     # noise = x.new(1, 1, *x.shape[2:]).normal_(0, 1)
     # x = torch.cat([x, noise], 1)
@@ -108,6 +122,11 @@ def extract_proposals_from_image(model, img, scale=1, score_threshold=0.8, pad_o
     preds = [(m, s, (p - np.array(pad_offset) - border_pad) / real_scale)
              for masks, scores, positions in preds
              for m, s, p in zip(masks, scores, positions)]
+    preds = [(m, s, p) for m, s, p in preds if
+             p[0] + m.shape[0] > 1 and
+             p[1] + m.shape[1] > 1 and
+             p[0] < img.shape[0] - 2 and
+             p[1] < img.shape[1] - 2]
     return preds
 
 

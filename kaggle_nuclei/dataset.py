@@ -18,17 +18,16 @@ bad_ids = {
 }
 
 
-train_size = 512
-train_pad = 64
+train_pad = 32
+train_size = 512 - train_pad * 2
 resnet_norm_mean = [0.5, 0.5, 0.5]
 resnet_norm_std = [0.5, 0.5, 0.5]
 
 
 class NucleiDataset(Dataset):
-    def __init__(self, data, supersample=1):
+    def __init__(self, data):
         self.has_mask = 'mask_compressed' in data[0]
         self.padding = train_pad
-        self.supersample = supersample
         self.supersample_indexes = None
         self._transforming_object_size = False
 
@@ -38,7 +37,7 @@ class NucleiDataset(Dataset):
             self.datas = data
 
         crop_conf = dict(
-            size=train_size + train_pad * 2, padding=train_pad, rotation={0, 90},
+            size=train_size + train_pad * 2, padding=0, rotation={0, 90},
             scale=(0.5, 2), horizontal_flip=True, vertical_flip=True)
 
         self.source_transform = tsf.Compose([
@@ -46,20 +45,10 @@ class NucleiDataset(Dataset):
             tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
         ])
         self.target_transform = tsf.Compose([
-            RandomAffineCrop(pad_mode='minimum', callback=self.target_transform_callback, **crop_conf),
+            RandomAffineCrop(pad_mode='minimum', **crop_conf),
         ])
 
-    def target_transform_callback(self, arr, crop_y, crop_x, rotation, scale, hflip, vflip, affine_matrix):
-        if not self._transforming_object_size:
-            return
-        arr *= scale
-
     def __getitem__(self, index):
-        if self.supersample != 1:
-            if self.supersample_indexes is None or index + 1 == len(self):
-                self.supersample_indexes = np.random.randint(len(self.datas), size=len(self))
-            index = self.supersample_indexes[index]
-
         data = self.datas[index]
         img = data['img'].float() / 255
 
@@ -73,7 +62,6 @@ class NucleiDataset(Dataset):
             pad = self.padding
             mask = data['mask_compressed'].float().unsqueeze(0)
             sdf = data['sdf_compressed'].float().div(127.5).sub(1).unsqueeze(0)
-            # obj_size = data['info_mask'][2:].float()
 
             torch.manual_seed(tseed)
             random.setstate(rstate)
@@ -83,16 +71,10 @@ class NucleiDataset(Dataset):
             random.setstate(rstate)
             sdf = self.target_transform(sdf)
 
-            # torch.manual_seed(tseed)
-            # random.setstate(rstate)
-            # self._transforming_object_size = True
-            # obj_size = self.target_transform(obj_size)
-            # self._transforming_object_size = False
-
             unpad = (slice(None), slice(pad, -pad), slice(pad, -pad))
             return img, mask[unpad], sdf[unpad] #, obj_size[unpad]
         else:
             return img
 
     def __len__(self):
-        return len(self.datas) * self.supersample
+        return len(self.datas)
