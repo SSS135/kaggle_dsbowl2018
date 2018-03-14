@@ -5,19 +5,18 @@ import sys
 import torch
 import torch.nn.functional as F
 import torch.utils.data
-from optfn.cosine_annealing import CosineAnnealingRestartLR
+from optfn.cosine_annealing import CosineAnnealingRestartParam
 from optfn.gadam import GAdam
 from optfn.param_groups_getter import get_param_groups
 from torch.autograd import Variable
 from tqdm import tqdm
-from torch import nn
 
 from .dataset import NucleiDataset
 from .feature_pyramid_network import FPN
 from .iou import threshold_iou, iou
-from .losses import dice_loss, soft_dice_loss, clipped_mse_loss
-from .unet import UNet
+from .losses import soft_dice_loss
 from .ms_d_net import MSDNet
+from .unet import UNet
 
 
 def train_preprocessor(train_data, epochs=15, pretrain_epochs=7, hard_example_subsample=1, network='msd'):
@@ -40,7 +39,7 @@ def train_preprocessor(train_data, epochs=15, pretrain_epochs=7, hard_example_su
     else:
         raise ValueError()
 
-    scheduler = CosineAnnealingRestartLR(optimizer, len(dataloader), 2)
+    scheduler = CosineAnnealingRestartParam(optimizer, len(dataloader), 2)
     pad = dataloader.dataset.padding
     best_model = model
     best_score = -math.inf

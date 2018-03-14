@@ -1,30 +1,10 @@
-import copy
-import math
-import random
-import sys
-
-import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.data
-import torchsample.transforms as tst
-import torchvision.transforms as tsf
-from optfn.cosine_annealing import CosineAnnealingRestartLR
-from optfn.param_groups_getter import get_param_groups
-from torch.autograd import Variable
-from torch.utils.data import Dataset
-from tqdm import tqdm
+from torch import nn
 
 from .dataset import train_pad, train_size
-from .iou import threshold_iou, iou
-from .losses import dice_loss
-from .transforms import RandomCrop, Pad
 from .unet import UNet
-from .dataset import resnet_norm_mean, resnet_norm_std
-from .postprocessing_dataset import PostprocessingDataset
-from optfn.gadam import GAdam
-from .dataset import train_pad, train_size
-from torch import nn
 
 try:
     import ppo_pytorch.ppo_pytorch as rl

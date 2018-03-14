@@ -5,7 +5,7 @@ import sys
 import torch
 import torch.nn.functional as F
 import torch.utils.data
-from optfn.cosine_annealing import CosineAnnealingRestartLR
+from optfn.cosine_annealing import CosineAnnealingRestartParam
 from optfn.gadam import GAdam
 from optfn.param_groups_getter import get_param_groups
 from sklearn.metrics import matthews_corrcoef, precision_recall_fscore_support
@@ -71,11 +71,12 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
     # model_disc.apply(weights_init)
 
     # optimizer = torch.optim.SGD(get_param_groups(model), lr=0.05, momentum=0.9, weight_decay=5e-4)
-    optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.01, momentum=0.9, weight_decay=1e-4)
+    optimizer_gen = GAdam(get_param_groups(model_gen), lr=0.5e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+                          amsgrad=False, nesterov=0.9, weight_decay=1e-4)
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
-    scheduler_gen = CosineAnnealingRestartLR(optimizer_gen, len(dataloader), 2)
+    scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2, param_name='nesterov')
     # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
     pad = dataloader.dataset.padding
@@ -114,8 +115,7 @@ def train_preprocessor_rpn(train_data, epochs=15, pretrain_epochs=7, saved_model
                 if train_pairs is None:
                     continue
 
-                indices, target_masks, target_scores, img_crops, layer_idx = train_pairs
-                pred_masks, pred_scores = get_masks_and_scores_from_indexes(model_gen, model_out_layers, indices)
+                pred_masks, target_masks, pred_scores, target_scores, img_crops, layer_idx = train_pairs
 
                 pred_masks = model_gen.predict_masks(pred_masks)
 
@@ -219,7 +219,6 @@ def get_train_pairs(
         pos_sdf_threshold=0.2, neg_sdf_threshold=-0.3,
         pos_size_limits=(0.4, 0.9), neg_size_limits=(0.2, 1.2)):
     outputs = []
-    indices = []
     for sample_idx in range(labels.shape[0]):
         net_out_sample = [(m[sample_idx], s[sample_idx, 0]) for m, s in net_out]
         o = get_train_pairs_single(
@@ -227,21 +226,15 @@ def get_train_pairs(
             pixel_sizes, pos_sdf_threshold, neg_sdf_threshold,
             pos_size_limits, neg_size_limits
         )
-        if len(o) != 0:
-            idx = [l[0] for l in o]
-            o = [l[1:] for l in o]
-            indices.append(idx)
-            outputs.extend(o)
-        else:
-            indices.append(tuple())
+        outputs.extend(o)
 
     if len(outputs) == 0:
         return None
 
     outputs = list(zip(*outputs))
     outputs, layer_idx = outputs[:-1], np.concatenate(outputs[-1])
-    target_masks, target_scores, img_crops = [torch.cat(o, 0) for o in outputs]
-    return indices, target_masks.unsqueeze(1).float(), target_scores, img_crops, layer_idx
+    pred_masks, target_masks, pred_scores, target_scores, img_crops = [torch.cat(o, 0) for o in outputs]
+    return pred_masks, target_masks.unsqueeze(1).float(), pred_scores, target_scores, img_crops, layer_idx
 
 
 def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
@@ -259,78 +252,8 @@ def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
             pos_size_limits, neg_size_limits
         )
         if o is not None:
-            outputs.append((*o, o[1].shape[0] * [layer_idx]))
+            outputs.append((*o, o[0].shape[0] * [layer_idx]))
     return outputs
-
-
-def generate_samples_for_layer(model, out_masks, out_scores, labels, sdf, obj_boxes, img,
-                               pos_sdf_threshold, neg_sdf_threshold,
-                               pos_size_limits, neg_size_limits):
-    # border and stride for converting between image space and conv-center space
-    border = model.mask_size // 2
-    stride = model.mask_size // model.mask_kernel_size
-
-    # slice to select values from image at conv center locations
-    mask_centers_slice = (
-        slice(border, -border + 1, stride),
-        slice(border, -border + 1, stride))
-    # [fs, fs] - sdf at conv centers
-    sdf_fs = sdf[mask_centers_slice]
-    # [4, fs, fs] - obj boxes at conv centers
-    obj_boxes_fs = obj_boxes[(slice(None), *mask_centers_slice)]
-    # [fs, fs] - obj size at conv centers; scaled to [0, 1] range, where 1 is `model.mask_size`
-    size_fs = torch.max(obj_boxes_fs[2], obj_boxes_fs[3]) / model.mask_size
-    # [fs] - X or Y locations of conv centers in image
-    fs_yx_range = torch.arange(border, labels.shape[-1] - border + 1, stride).cuda()
-    # [2, fs, fs] - YX grid of conv centers in image space
-    fs_img_conv_center_pos = torch.stack([
-        fs_yx_range.view(-1, 1).expand(-1, len(fs_yx_range)),
-        fs_yx_range.view(1, -1).expand(len(fs_yx_range), -1)
-    ], 0)
-    # [2, fs, fs] - top left corner offsets from obj centers
-    obj_min_offsets = fs_img_conv_center_pos - obj_boxes_fs[:2]
-    # [2, fs, fs] - bottom right corner offsets from obj centers
-    obj_max_offsets = obj_boxes_fs[2:] - obj_min_offsets
-    # [4, fs, fs]
-    biggest_offsets = torch.cat([obj_min_offsets, obj_max_offsets], 0)
-    # [fs, fs] with [0, 0.5] where 0.5 is half mask offset from center
-    biggest_offsets = biggest_offsets.div(model.mask_size).max(0)[0]
-
-    assert sdf_fs.shape == 2 * (out_masks.shape[1] - model.conv_size + 1,), (sdf_fs.shape, out_masks.shape)
-
-    pos_centers_fmap = (biggest_offsets < pos_size_limits[1] / 2) & \
-                       (size_fs > pos_size_limits[0]) & \
-                       (sdf_fs > pos_sdf_threshold)
-    neg_centers_fmap = (biggest_offsets > neg_size_limits[1] / 2) | \
-                       (size_fs < neg_size_limits[0]) | \
-                       (sdf_fs < neg_sdf_threshold)
-
-    # TODO: allow zero negative centers
-    if pos_centers_fmap.sum() == 0 or neg_centers_fmap.sum() == 0:
-        return None
-
-    pos_centers = mask_to_indexes(pos_centers_fmap, stride, border, labels.shape[-1])
-
-    pos_centers_fmap_idx = pos_centers_fmap.view(-1).nonzero().squeeze()
-    neg_centers_fmap_idx = neg_centers_fmap.view(-1).nonzero().squeeze()
-    neg_centers_fmap_idx = neg_centers_fmap_idx[torch.randperm(len(neg_centers_fmap_idx))[:256].cuda()]
-    # pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx))
-    # pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx))
-
-    # pred_scores = torch.cat([pred_pos_scores, pred_neg_scores])
-    target_scores = out_scores.data.new(len(pos_centers_fmap_idx) + len(neg_centers_fmap_idx)).fill_(0)
-    target_scores[:len(pos_centers_fmap_idx)] = 1
-
-    label_crops = center_crop(labels, pos_centers, (-border, border), labels.shape[-1])
-    pos_center_label_nums = labels.take(pos_centers)
-    target_masks = label_crops == pos_center_label_nums.view(-1, 1, 1)
-    # [num masks, conv channels, conv size, conv size]
-    # pred_masks = center_crop(out_masks, pos_centers_fmap_idx, (0, model.conv_size), pos_centers_fmap.shape[0])
-    img_crops = center_crop(img, pos_centers, (-border, border), labels.shape[-1])
-
-    mask_score_indexes = pos_centers_fmap.shape[0], pos_centers_fmap_idx, neg_centers_fmap_idx
-
-    return mask_score_indexes, target_masks, target_scores, img_crops
 
 
 def get_object_boxes(labels):
@@ -483,31 +406,72 @@ def mask_to_indexes(mask, stride, border, size):
     return idx[:, 0] * size + idx[:, 1]
 
 
-def get_masks_and_scores_from_indexes(model, net_out, indices):
-    masks = []
-    scores = []
-    for si, sample_indices in enumerate(indices):
-        if len(sample_indices) == 0:
-            continue
-        for li, layer_indices in enumerate(sample_indices):
-            om, os = net_out[li]
-            pm, ps = get_masks_and_scores_from_indexes_for_layer(model, om[si], os[si], layer_indices)
-            masks.append(pm)
-            scores.append(ps)
-    masks, scores = [torch.cat(x, 0) for x in (masks, scores)]
-    return masks, scores
+def generate_samples_for_layer(model, out_masks, out_scores, labels, sdf, obj_boxes, img,
+                               pos_sdf_threshold, neg_sdf_threshold,
+                               pos_size_limits, neg_size_limits):
+    # border and stride for converting between image space and conv-center space
+    border = model.mask_size // 2
+    stride = model.mask_size // model.mask_kernel_size
 
+    # slice to select values from image at conv center locations
+    mask_centers_slice = (
+        slice(border, -border + 1, stride),
+        slice(border, -border + 1, stride))
+    # [fs, fs] - sdf at conv centers
+    sdf_fs = sdf[mask_centers_slice]
+    # [4, fs, fs] - obj boxes at conv centers
+    obj_boxes_fs = obj_boxes[(slice(None), *mask_centers_slice)]
+    # [fs, fs] - obj size at conv centers; scaled to [0, 1] range, where 1 is `model.mask_size`
+    size_fs = torch.max(obj_boxes_fs[2], obj_boxes_fs[3]) / model.mask_size
+    # [fs] - X or Y locations of conv centers in image
+    fs_yx_range = torch.arange(border, labels.shape[-1] - border + 1, stride).cuda()
+    # [2, fs, fs] - YX grid of conv centers in image space
+    fs_img_conv_center_pos = torch.stack([
+        fs_yx_range.view(-1, 1).expand(-1, len(fs_yx_range)),
+        fs_yx_range.view(1, -1).expand(len(fs_yx_range), -1)
+    ], 0)
+    # [2, fs, fs] - top left corner offsets from obj centers
+    obj_min_offsets = fs_img_conv_center_pos - obj_boxes_fs[:2]
+    # [2, fs, fs] - bottom right corner offsets from obj centers
+    obj_max_offsets = obj_boxes_fs[2:] - obj_min_offsets
+    # [4, fs, fs]
+    biggest_offsets = torch.cat([obj_min_offsets, obj_max_offsets], 0)
+    # [fs, fs] with [0, 0.5] where 0.5 is half mask offset from center
+    biggest_offsets = biggest_offsets.div(model.mask_size).max(0)[0]
 
-def get_masks_and_scores_from_indexes_for_layer(model, out_masks, out_scores, indexes):
-    pos_centers_fmap_size, pos_centers_fmap_idx, neg_centers_fmap_idx = indexes
+    assert sdf_fs.shape == 2 * (out_masks.shape[1] - model.conv_size + 1,), (sdf_fs.shape, out_masks.shape)
 
+    pos_centers_fmap = (biggest_offsets < pos_size_limits[1] / 2) & \
+                       (size_fs > pos_size_limits[0]) & \
+                       (sdf_fs > pos_sdf_threshold)
+    neg_centers_fmap = (biggest_offsets > neg_size_limits[1] / 2) | \
+                       (size_fs < neg_size_limits[0]) | \
+                       (sdf_fs < neg_sdf_threshold)
+
+    # TODO: allow zero negative centers
+    if pos_centers_fmap.sum() == 0 or neg_centers_fmap.sum() == 0:
+        return None
+
+    pos_centers = mask_to_indexes(pos_centers_fmap, stride, border, labels.shape[-1])
+
+    pos_centers_fmap_idx = pos_centers_fmap.view(-1).nonzero().squeeze()
+    neg_centers_fmap_idx = neg_centers_fmap.view(-1).nonzero().squeeze()
+    neg_centers_fmap_idx = neg_centers_fmap_idx[torch.randperm(len(neg_centers_fmap_idx))[:256].cuda()]
     pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx))
     pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx))
+
     pred_scores = torch.cat([pred_pos_scores, pred_neg_scores])
+    target_scores = out_scores.data.new(pred_scores.shape[0]).fill_(0)
+    target_scores[:pred_pos_scores.shape[0]] = 1
 
-    pred_masks = center_crop(out_masks, pos_centers_fmap_idx, (0, model.conv_size), pos_centers_fmap_size)
+    label_crops = center_crop(labels, pos_centers, (-border, border), labels.shape[-1])
+    pos_center_label_nums = labels.take(pos_centers)
+    target_masks = label_crops == pos_center_label_nums.view(-1, 1, 1)
+    # [num masks, conv channels, conv size, conv size]
+    pred_masks = center_crop(out_masks, pos_centers_fmap_idx, (0, model.conv_size), pos_centers_fmap.shape[0])
+    img_crops = center_crop(img, pos_centers, (-border, border), labels.shape[-1])
 
-    return pred_masks, pred_scores
+    return pred_masks, target_masks, pred_scores, target_scores, img_crops
 
 
 # # custom weights initialization called on netG and netD

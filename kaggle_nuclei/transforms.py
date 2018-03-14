@@ -1,12 +1,12 @@
-import random
 import math
+import random
 
-import torch
+import numpy as np
 import scipy
 import scipy.misc
 import scipy.ndimage
+import torch
 import torch.nn.functional as F
-import numpy as np
 
 
 class MeanNormalize:

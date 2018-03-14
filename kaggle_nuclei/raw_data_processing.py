@@ -2,9 +2,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy import ndimage
 from skimage import io
 from tqdm import tqdm
-from scipy import ndimage
 
 from .distance_field import distance_field
 

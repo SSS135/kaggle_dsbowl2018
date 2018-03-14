@@ -1,16 +1,15 @@
 import math
+from functools import reduce
 
 import numpy as np
 import scipy.misc
 import torch
 import torch.nn.functional as F
-from functools import reduce
-from skimage.transform import resize
 from torch.autograd import Variable
 from tqdm import tqdm
-from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
-from .preprocessor_rpn_training import center_crop, mask_to_indexes
 
+from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
+from .preprocessor_rpn_training import center_crop
 
 mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
 img_size_div = 32
@@ -46,8 +45,29 @@ def predict_rpn(model, raw_data, stride=4, max_stride=32, max_scale=1, tested_sc
     return results
 
 
-def masked_non_max_suppression(img, labels):
-    pass
+def masked_non_max_suppression(img, proposals, mask_threshold=0, max_allowed_intersection=0.2):
+    labels = torch.LongTensor(*img.shape[1:]).zero_()
+    proposals = sorted(proposals, key=lambda x: -x[1])
+    cur_obj_index = 1
+    for mask, _, pos in proposals:
+        bounds_label = np.array([pos[0], pos[0] + mask.shape[0], pos[1], pos[1] + mask.shape[1]])
+        bounds_label_clip = bounds_label.copy()
+        bounds_label_clip[:2] = bounds_label[:2].clip(0, labels.shape[0])
+        bounds_label_clip[2:] = bounds_label[2:].clip(0, labels.shape[1])
+        bounds_mask_clip = bounds_label_clip - bounds_label
+        bounds_label_clip, bounds_mask_clip = bounds_label_clip.tolist(), bounds_mask_clip.tolist()
+
+        label_crop = labels[bounds_label_clip[0]:bounds_label_clip[1], bounds_label_clip[2]:bounds_label_clip[3]]
+        mask_crop = mask[bounds_mask_clip[0]:bounds_mask_clip[1], bounds_mask_clip[2]:bounds_mask_clip[3]]
+        label_crop_mask, mask_crop_mask = label_crop > 0, mask_crop > mask_threshold
+
+        intersection_area = (label_crop_mask & mask_crop_mask).sum()
+        mask_area = mask_crop_mask.sum()
+        if intersection_area > mask_area * max_allowed_intersection:
+            continue
+        label_crop[(label_crop_mask == 0) & (mask_crop_mask != 0)] = cur_obj_index
+        cur_obj_index += 1
+    return labels
 
 
 def extract_strided_proposals_from_image(model, img, scale=1, score_threshold=0.8,

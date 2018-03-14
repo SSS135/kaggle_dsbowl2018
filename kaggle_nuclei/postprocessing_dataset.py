@@ -1,16 +1,15 @@
 import random
 import sys
 
-import numpy as np
 import torch
 import torch.utils.data
 import torchsample.transforms as tst
 import torchvision.transforms as tsf
 from torch.utils.data import Dataset
 
-from .dataset import train_pad, train_size
 from .dataset import resnet_norm_mean, resnet_norm_std
-from .transforms import RandomCrop, Pad, RandomAffineCrop
+from .dataset import train_pad, train_size
+from .transforms import RandomAffineCrop
 
 
 class PostprocessingDataset(Dataset):

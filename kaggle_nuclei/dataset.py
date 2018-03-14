@@ -1,21 +1,12 @@
-import torch
-import torchvision.transforms as tsf
-from torch.utils.data import Dataset
-import random
-import sys
-import numpy as np
-import torchsample.transforms as tst
-from .transforms import RandomCrop, Pad, RandomAffineCrop
 import random
 import sys
 
 import numpy as np
 import torch
-import torchsample.transforms as tst
 import torchvision.transforms as tsf
 from torch.utils.data import Dataset
 
-from .transforms import RandomCrop, Pad
+from .transforms import RandomAffineCrop
 
 bad_ids = {
     '19f0653c33982a416feed56e5d1ce6849fd83314fd19dfa1c5b23c6b66e9868a', # very many mistakes
@@ -27,7 +18,7 @@ bad_ids = {
 }
 
 
-train_size = 256
+train_size = 512
 train_pad = 64
 resnet_norm_mean = [0.5, 0.5, 0.5]
 resnet_norm_std = [0.5, 0.5, 0.5]

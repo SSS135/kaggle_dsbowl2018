@@ -1,15 +1,14 @@
 import math
+from functools import reduce
 
 import numpy as np
 import scipy.misc
 import torch
 import torch.nn.functional as F
-from functools import reduce
-from skimage.transform import resize
 from torch.autograd import Variable
 from tqdm import tqdm
-from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
 
+from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
 
 mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
 

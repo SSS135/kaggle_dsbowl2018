@@ -1,38 +1,21 @@
-import copy
-import math
-import random
 import sys
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data
-import torchsample.transforms as tst
-import torchvision.transforms as tsf
-from optfn.cosine_annealing import CosineAnnealingRestartLR
-from optfn.param_groups_getter import get_param_groups
-from torch.autograd import Variable
-from torch.utils.data import Dataset
-from tqdm import tqdm
-from scipy.ndimage import gaussian_filter
-
-from .dataset import NucleiDataset
-from .dataset import train_pad, train_size
-from .iou import mean_threshold_object_iou, iou, threshold_iou
-from .losses import dice_loss
-from .transforms import RandomCrop, Pad
-from .unet import UNet
-from .dataset import resnet_norm_mean, resnet_norm_std
-from .postprocessing_dataset import PostprocessingDataset
+from optfn.cosine_annealing import CosineAnnealingRestartParam
 from optfn.gadam import GAdam
-import gym.spaces
-from functools import partial, reduce
-from .unet_actor import UNetActorCritic
+from optfn.param_groups_getter import get_param_groups
 from skimage.morphology import label
-from optfn.snes import SNES
-import torch
-import torch.nn as nn
-from .unet_actor import SimpleCNNActor
+from torch.autograd import Variable
+from tqdm import tqdm
+
+from .dataset import train_pad
+from .iou import mean_threshold_object_iou, iou
+from .postprocessing_dataset import PostprocessingDataset
+from .unet import UNet
 
 try:
     import ppo_pytorch.ppo_pytorch as rl
@@ -50,8 +33,8 @@ def train_postprocessor_ppo(train_data, train_pred, epochs=7):
     disc_model = GanD_UNet(8).cuda()
     disc_optimizer = GAdam(get_param_groups(disc_model), lr=1e-4, betas=(0.5, 0.999), avg_sq_mode='tensor', weight_decay=5e-5)
 
-    gen_scheduler = CosineAnnealingRestartLR(gen_optimizer, len(dataloader), 2)
-    disc_scheduler = CosineAnnealingRestartLR(disc_optimizer, len(dataloader), 2)
+    gen_scheduler = CosineAnnealingRestartParam(gen_optimizer, len(dataloader), 2)
+    disc_scheduler = CosineAnnealingRestartParam(disc_optimizer, len(dataloader), 2)
 
     sys.stdout.flush()
 

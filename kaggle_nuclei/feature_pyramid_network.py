@@ -1,26 +1,23 @@
 # https://github.com/kuangliu/pytorch-fpn/blob/master/fpn.py
 
+import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.autograd import Variable
 from torch.nn.modules.batchnorm import _BatchNorm
 from torch.nn.modules.instancenorm import _InstanceNorm
 from torch.utils import model_zoo
-from torchvision.models.resnet import resnet50, resnet101, model_urls
-import torch
-from .conv_chunk import ConvChunk2d
-from .skip_connections import DenseSequential, ResidualSequential
-from optfn.full_norm import FullNorm2d
+from torchvision.models.resnet import resnet50, model_urls
 
 
-def weights_init(m):
-    # if isinstance(m, F._ConvNd) or isinstance(m, nn.Linear):
-    #     torch.nn.init.orthogonal(m.weight.data, torch.nn.init.calculate_gain('relu'))
-    #     if m.bias is not None:
-    #         m.bias.data.fill_(0)
-    if isinstance(m, _BatchNorm) or isinstance(m, _InstanceNorm):
-        m.weight.data.normal_(1.0, 0.02)
-        m.bias.data.fill_(0)
+# def weights_init(m):
+#     # if isinstance(m, F._ConvNd) or isinstance(m, nn.Linear):
+#     #     torch.nn.init.orthogonal(m.weight.data, torch.nn.init.calculate_gain('relu'))
+#     #     if m.bias is not None:
+#     #         m.bias.data.fill_(0)
+#     if isinstance(m, _BatchNorm) or isinstance(m, _InstanceNorm):
+#         m.weight.data.normal_(1.0, 0.02)
+#         m.bias.data.fill_(0)
 
 
 class MaskHead(nn.Module):
@@ -250,11 +247,11 @@ class FPN(nn.Module):
         self.score_head = ScoreHead(num_filters, num_scores)
         self.conv_size = self.mask_head.conv_size
 
-        self.reset_weights()
+        # self.reset_weights()
 
-    def reset_weights(self):
-        self.apply(weights_init)
-        self.resnet.load_state_dict(model_zoo.load_url(model_urls['resnet50']))
+    # def reset_weights(self):
+    #     self.apply(weights_init)
+    #     self.resnet.load_state_dict(model_zoo.load_url(model_urls['resnet50']))
 
     def freeze_pretrained_layers(self, freeze):
         for p in self.resnet.parameters():

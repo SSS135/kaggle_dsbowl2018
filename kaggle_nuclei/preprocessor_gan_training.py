@@ -5,21 +5,17 @@ import sys
 import torch
 import torch.nn.functional as F
 import torch.utils.data
-from optfn.cosine_annealing import CosineAnnealingRestartLR
+from optfn.cosine_annealing import CosineAnnealingRestartParam
 from optfn.gadam import GAdam
 from optfn.param_groups_getter import get_param_groups
-from torch.autograd import Variable
-from tqdm import tqdm
 from torch import nn
+from torch.autograd import Variable
+from torch.nn.modules.batchnorm import _BatchNorm
+from tqdm import tqdm
 
 from .dataset import NucleiDataset
-from .feature_pyramid_network import FPN
 from .iou import threshold_iou, iou
-from .losses import dice_loss, soft_dice_loss, clipped_mse_loss
 from .unet import UNet
-from .ms_d_net import MSDNet
-from torch.nn.modules.conv import _ConvNd
-from torch.nn.modules.batchnorm import _BatchNorm
 
 
 def train_preprocessor_gan(train_data, epochs=15, pretrain_epochs=7, resnet=False):
@@ -45,8 +41,8 @@ def train_preprocessor_gan(train_data, epochs=15, pretrain_epochs=7, resnet=Fals
     gen_model.apply(weights_init)
     disc_model.apply(weights_init)
 
-    gen_scheduler = CosineAnnealingRestartLR(gen_optimizer, len(dataloader), 2)
-    disc_scheduler = CosineAnnealingRestartLR(disc_optimizer, len(dataloader), 2)
+    gen_scheduler = CosineAnnealingRestartParam(gen_optimizer, len(dataloader), 2)
+    disc_scheduler = CosineAnnealingRestartParam(disc_optimizer, len(dataloader), 2)
 
     best_model = gen_model
     best_score = -math.inf
