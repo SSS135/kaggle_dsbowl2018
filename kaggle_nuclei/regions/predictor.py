@@ -8,8 +8,8 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from tqdm import tqdm
 
-from .dataset import resnet_norm_mean, resnet_norm_std, train_pad
-from .preprocessor_rpn_training import center_crop
+from ..dataset import resnet_norm_mean, resnet_norm_std, train_pad
+from .training import center_crop
 
 mean_std_sub = torch.FloatTensor([resnet_norm_mean, resnet_norm_std]).cuda()
 img_size_div = 32
@@ -17,7 +17,7 @@ border_pad = 64
 total_pad = train_pad + border_pad
 
 
-def predict_rpn(model, raw_data, stride=4, max_stride=32, max_scale=1, tested_scales=1):
+def predict(model, raw_data, stride=4, max_stride=32, max_scale=1, tested_scales=1):
     model.eval()
 
     max_scale = math.log10(max_scale)
