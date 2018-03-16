@@ -18,34 +18,6 @@ border_pad = 64
 total_pad = train_pad + border_pad
 
 
-def predict(model, raw_data, stride=4, max_stride=32, max_scale=1, tested_scales=1):
-    model.eval()
-
-    max_scale = math.log10(max_scale)
-    scales = np.logspace(-max_scale, max_scale, num=tested_scales)
-
-    results = []
-    for data in tqdm(raw_data):
-        img = data['img']
-        out_mean = None
-        sum_count = 0
-        for scale in scales:
-            out = extract_proposals_from_image(model, img, scale, 0)
-            return out
-            if out[0] is None:
-                continue
-            out = reduce(np.add, out)
-            out /= 4
-            if out_mean is not None:
-                out_mean += out
-            else:
-                out_mean = out
-            sum_count += 1
-        out_mean /= sum_count
-        results.append(out_mean)
-    return results
-
-
 def masked_non_max_suppression(img_shape, proposals, mask_threshold=0, max_allowed_intersection=0.2):
     labels = np.zeros(img_shape, dtype=int)
     used_proposals = []
@@ -137,7 +109,7 @@ def extract_proposals_from_layer(model, layer, pixel_size, stride, scale, sigmoi
     good_idx = good_score_mask.view(-1).nonzero().squeeze()
     if len(good_idx) == 0:
         return None
-    good_masks = center_crop(masks, good_idx, (0, model.conv_size), scores.shape[-1])
+    good_masks = center_crop(masks, good_idx, (0, model.region_size), scores.shape[-1])
     good_masks = model.predict_masks(good_masks)
     size = (np.array(good_masks.shape[-2:]) * pixel_size / scale).round().astype(int)
     size = size[0].item(), size[1].item()
