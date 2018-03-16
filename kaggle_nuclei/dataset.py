@@ -37,7 +37,7 @@ class NucleiDataset(Dataset):
             self.datas = data
 
         crop_conf = dict(
-            size=train_size + train_pad * 2, padding=0, rotation={0, 90},
+            size=train_size + train_pad * 2, padding=0, rotation={(0, 360)},
             scale=(0.5, 2), horizontal_flip=True, vertical_flip=True)
 
         self.source_transform = tsf.Compose([

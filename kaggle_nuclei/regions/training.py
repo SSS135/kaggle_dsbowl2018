@@ -13,7 +13,7 @@ from torch.autograd import Variable
 from tqdm import tqdm
 from torch import nn
 
-from ..dataset import NucleiDataset
+from ..dataset import NucleiDataset, train_pad, train_size
 from .feature_pyramid_network import FPN
 from ..iou import threshold_iou, iou
 from ..losses import dice_loss, soft_dice_loss, clipped_mse_loss
@@ -23,6 +23,7 @@ from torch.nn.modules.conv import _ConvNd
 from torch.nn.modules.batchnorm import _BatchNorm
 import time
 from collections import OrderedDict
+from tensorboardX import SummaryWriter
 
 
 def binary_cross_entropy_with_logits(x, z, reduce=True):
@@ -58,7 +59,7 @@ def batch_to_instance_norm(model):
 
 def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None):
     dataset = NucleiDataset(train_data)
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=4, pin_memory=True)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=2, pin_memory=True)
 
     model_gen = FPN(1, 3).cuda() if saved_model is None else saved_model.cuda()
     batch_to_instance_norm(model_gen)
@@ -77,18 +78,20 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
     scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
     # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
-    pad = dataloader.dataset.padding
     best_state_dict = copy_state_dict(model_gen)
     best_score = -math.inf
 
     # one = Variable(torch.cuda.FloatTensor([0.95]))
     # zero = Variable(torch.cuda.FloatTensor([0.05]))
 
+    # summary = SummaryWriter()
+    # summary.add_text('hparams', f'epochs {epochs}; pretrain {pretrain_epochs}; '
+    #                             f'batch size {dataloader.batch_size}; img size {train_size}; img pad {train_pad}')
+
     sys.stdout.flush()
 
     for epoch in range(epochs):
         with tqdm(dataloader) as pbar:
-            optimizer_gen.zero_grad()
             model_gen.freeze_pretrained_layers(epoch < pretrain_epochs)
             score_fscore_sum, t_iou_sum, f_iou_sum = 0, 0, 0
 
@@ -98,7 +101,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 img, labels, sdf = [x.cuda() for x in data]
                 x_train = Variable(img)
                 sdf_train = Variable(sdf)
-                mask_train = Variable((labels > 0).float().clamp(0.05, 0.95))
+                mask_train = Variable((labels > 0).float().clamp(0.02, 0.98))
 
                 cont_train = 1 - sdf_train.data ** 2
                 cont_train = (cont_train.clamp(0.9, 1) - 0.9) * 20 - 1
@@ -106,9 +109,10 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
 
                 optimizer_gen.zero_grad()
 
-                model_out_layers, model_out_img = model_gen(x_train, pad)
+                model_out_layers, model_out_img = model_gen(x_train, train_pad)
                 train_pairs = get_train_pairs(
-                    model_gen, labels, sdf, img[:, :, pad:-pad, pad:-pad], model_out_layers, model_gen.mask_pixel_sizes)
+                    model_gen, labels, sdf, img[:, :, train_pad:-train_pad, train_pad:-train_pad],
+                    model_out_layers, model_gen.mask_pixel_sizes)
 
                 if train_pairs is None:
                     continue
@@ -123,8 +127,8 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 if return_predictions_at_epoch is not None and return_predictions_at_epoch == epoch:
                     return pred_masks.data.cpu(), target_masks.cpu(), img_crops.cpu(), x_train.data.cpu(), labels.cpu(), model_gen
 
-                target_masks = Variable(target_masks)
-                target_scores = Variable(target_scores)
+                target_masks = Variable(target_masks.clamp(0.02, 0.98))
+                target_scores = Variable(target_scores.clamp(0.02, 0.98))
                 # img_crops = Variable(img_crops)
                 #
                 # # real
@@ -182,6 +186,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
 
                 loss.backward()
                 optimizer_gen.step()
+                optimizer_gen.zero_grad()
 
                 scheduler_gen.step()
                 # scheduler_disc.step()
@@ -214,8 +219,8 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
 
 def get_train_pairs(
         model, labels, sdf, img, net_out, pixel_sizes,
-        pos_sdf_threshold=0.2, neg_sdf_threshold=-0.3,
-        pos_size_limits=(0.4, 0.9), neg_size_limits=(0.2, 1.2)):
+        pos_sdf_threshold=0.5, neg_sdf_threshold=-0.05,
+        pos_size_limits=(0.4, 0.8), neg_size_limits=(0.15, 1.2)):
     outputs = []
     for sample_idx in range(labels.shape[0]):
         net_out_sample = [(m[sample_idx], s[sample_idx, 0]) for m, s in net_out]
@@ -259,7 +264,7 @@ def generate_samples_for_layer(model, out_masks, out_scores, labels, sdf, obj_bo
                                pos_size_limits, neg_size_limits):
     # border and stride for converting between image space and conv-center space
     border = model.mask_size // 2
-    stride = model.mask_size // model.mask_kernel_size
+    stride = model.mask_size // model.region_size
 
     # slice to select values from image at conv center locations
     mask_centers_slice = (
@@ -287,7 +292,7 @@ def generate_samples_for_layer(model, out_masks, out_scores, labels, sdf, obj_bo
     # [fs, fs] with [0, 0.5] where 0.5 is half mask offset from center
     biggest_offsets = biggest_offsets.div(model.mask_size).max(0)[0]
 
-    assert sdf_fs.shape == 2 * (out_masks.shape[1] - model.conv_size + 1,), (sdf_fs.shape, out_masks.shape)
+    assert sdf_fs.shape == 2 * (out_masks.shape[1] - model.region_size + 1,), (sdf_fs.shape, out_masks.shape)
 
     pos_centers_fmap = (biggest_offsets < pos_size_limits[1] / 2) & \
                        (size_fs > pos_size_limits[0]) & \
@@ -318,7 +323,7 @@ def generate_samples_for_layer(model, out_masks, out_scores, labels, sdf, obj_bo
     pos_center_label_nums = labels.take(pos_centers)
     target_masks = label_crops == pos_center_label_nums.view(-1, 1, 1)
     # [num masks, conv channels, conv size, conv size]
-    pred_masks = center_crop(out_masks, pos_centers_fmap_idx, (0, model.conv_size), pos_centers_fmap.shape[0])
+    pred_masks = center_crop(out_masks, pos_centers_fmap_idx, (0, model.region_size), pos_centers_fmap.shape[0])
     img_crops = center_crop(img, pos_centers, (-border, border), labels.shape[-1])
 
     return pred_masks, target_masks, pred_scores, target_scores, img_crops
