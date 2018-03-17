@@ -111,10 +111,8 @@ class MaskHead(nn.Module):
 
 
 class ScoreHead(nn.Module):
-    def __init__(self, num_filters, num_scores, region_size):
+    def __init__(self, num_filters, num_scores):
         super().__init__()
-        self.region_size = region_size
-
         self.score_layers = nn.Sequential(
             ResidualSequential(
                 nn.Sequential(
@@ -151,9 +149,49 @@ class ScoreHead(nn.Module):
 
     def forward(self, input):
         score = self.score_layers(input.contiguous())
-        p = self.region_size // 2
-        score = score[:, :, p:-p, p:-p].contiguous()
         return score
+
+
+class BoxHead(nn.Module):
+    def __init__(self, num_filters, num_boxes):
+        super().__init__()
+        self.score_layers = nn.Sequential(
+            ResidualSequential(
+                nn.Sequential(
+                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
+                    nn.BatchNorm2d(num_filters, affine=True),
+                    nn.ReLU(True),
+                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
+                    nn.BatchNorm2d(num_filters, affine=True),
+                    nn.ReLU(True),
+                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
+                    nn.BatchNorm2d(num_filters, affine=True),
+                    nn.ReLU(True),
+                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
+                    nn.BatchNorm2d(num_filters, affine=True),
+                    nn.ReLU(True),
+                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+                ),
+            ),
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters, affine=True),
+            nn.ReLU(True),
+
+            nn.Conv2d(num_filters, num_boxes * 4, 1),
+        )
+
+    def forward(self, input):
+        boxes = self.score_layers(input.contiguous())
+        return boxes
 
 
 class VerticalLayerSimple(nn.Module):
@@ -222,7 +260,7 @@ class FPN(nn.Module):
     mask_size = 28
     region_size = 7
 
-    def __init__(self, num_scores=1, out_image_channels=0, num_filters=256):
+    def __init__(self, num_scores, num_boxes, out_image_channels=0, num_filters=256):
         super().__init__()
 
         self.mask_pixel_sizes = (1, 2, 4, 8)
@@ -261,13 +299,8 @@ class FPN(nn.Module):
         ) if out_image_channels != 0 else None
 
         self.mask_head = MaskHead(num_filters, self.region_size, self.mask_size)
-        self.score_head = ScoreHead(num_filters, num_scores, self.region_size)
-
-        # self.reset_weights()
-
-    # def reset_weights(self):
-    #     self.apply(weights_init)
-    #     self.resnet.load_state_dict(model_zoo.load_url(model_urls['resnet50']))
+        self.score_head = ScoreHead(num_filters, num_scores)
+        self.box_head = BoxHead(num_filters, num_boxes)
 
     def freeze_pretrained_layers(self, freeze):
         for p in self.resnet.parameters():
@@ -302,10 +335,10 @@ class FPN(nn.Module):
             p5, p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
                               ((p5, ou // 32), (p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
 
-        m5 = self.mask_head(p5), self.score_head(p5)
-        m4 = self.mask_head(p4), self.score_head(p4)
-        m3 = self.mask_head(p3), self.score_head(p3)
-        m2 = self.mask_head(p2), self.score_head(p2)
+        m5 = self.mask_head(p5), self.score_head(p5), self.box_head(p5)
+        m4 = self.mask_head(p4), self.score_head(p4), self.box_head(p4)
+        m3 = self.mask_head(p3), self.score_head(p3), self.box_head(p3)
+        m2 = self.mask_head(p2), self.score_head(p2), self.box_head(p2)
 
         return (m2, m3, m4, m5), img
 

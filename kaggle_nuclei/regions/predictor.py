@@ -5,6 +5,7 @@ import numpy as np
 import scipy.misc
 import torch
 import torch.nn.functional as F
+from scipy import ndimage
 from torch.autograd import Variable
 from tqdm import tqdm
 
@@ -18,7 +19,7 @@ border_pad = 64
 total_pad = train_pad + border_pad
 
 
-def masked_non_max_suppression(img_shape, proposals, mask_threshold=0, max_allowed_intersection=0.2):
+def masked_non_max_suppression(img_shape, proposals, mask_threshold=0, max_allowed_intersection=0.2, min_obj_size=10):
     labels = np.zeros(img_shape, dtype=int)
     used_proposals = []
     proposals = sorted(proposals, key=lambda x: -x[1])
@@ -43,6 +44,15 @@ def masked_non_max_suppression(img_shape, proposals, mask_threshold=0, max_allow
         mask_area = mask_crop_mask.sum()
         if mask_area == 0 or intersection_area > mask_area * max_allowed_intersection:
             continue
+
+        obj = ndimage.find_objects(mask > 0)
+        if len(obj) != 1:
+            continue
+        obj = obj[0]
+        shape = obj[0].stop - obj[0].start, obj[1].stop - obj[1].start
+        if shape[0] < min_obj_size or shape[1] < min_obj_size:
+            continue
+
         used_proposals.append((mask, score, pos))
         label_crop[(label_crop_mask == 0) & (mask_crop_mask != 0)] = cur_obj_index
         cur_obj_index += 1
@@ -61,7 +71,8 @@ def extract_strided_proposals_from_image(model, img, score_threshold=0.8,
         scales)
     for (offset_y, offset_x, scale) in combs:
         new = extract_proposals_from_image(model, img, scale, score_threshold, (offset_y, offset_x))
-        proposals.extend(new)
+        if new is not None:
+            proposals.extend(new)
     return proposals
 
 
