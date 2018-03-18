@@ -10,7 +10,6 @@ from torch.autograd import Variable
 from tqdm import tqdm
 
 from ..dataset import resnet_norm_mean, resnet_norm_std, train_pad
-from .training import center_crop
 import itertools
 import torchvision.transforms as tsf
 

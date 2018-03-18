@@ -9,6 +9,8 @@ from torch.nn.modules.instancenorm import _InstanceNorm
 from torch.utils import model_zoo
 from torchvision.models.resnet import resnet50, model_urls
 from ..skip_connections import ResidualSequential, DenseSequential
+import itertools
+import math
 
 
 # def weights_init(m):
@@ -111,7 +113,7 @@ class MaskHead(nn.Module):
 
 
 class ScoreHead(nn.Module):
-    def __init__(self, num_filters, num_scores):
+    def __init__(self, num_filters, num_scores, init_foreground_confidence=0.01):
         super().__init__()
         self.score_layers = nn.Sequential(
             ResidualSequential(
@@ -147,15 +149,23 @@ class ScoreHead(nn.Module):
             nn.Conv2d(num_filters, num_scores, 1),
         )
 
+        # self.score_layers[-1].bias.data.fill_(-math.log((1 - init_foreground_confidence) / init_foreground_confidence))
+
     def forward(self, input):
         score = self.score_layers(input.contiguous())
         return score
 
 
 class BoxHead(nn.Module):
-    def __init__(self, num_filters, num_boxes):
+    def __init__(self, num_filters, region_size,
+                 sizes=((2 ** -0.5, 2 * 2 ** -0.5), (1, 1), (2 * 2 ** -0.5, 2 ** -0.5)),
+                 scales=(2**(-1 / 3), 1, 2**(1 / 3))):
         super().__init__()
-        self.score_layers = nn.Sequential(
+        self.register_buffer('pixel_boxes', None)
+        pixel_boxes = [(size[0] * scale * region_size, size[1] * scale * region_size)
+                            for size, scale in itertools.product(sizes, scales)]
+        self.pixel_boxes = torch.Tensor(pixel_boxes).float()
+        self.layers = nn.Sequential(
             ResidualSequential(
                 nn.Sequential(
                     nn.Conv2d(num_filters, num_filters, 1, bias=False),
@@ -186,12 +196,37 @@ class BoxHead(nn.Module):
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
-            nn.Conv2d(num_filters, num_boxes * 4, 1),
+            nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1, bias=False),
         )
+        self.layers[-1].weight.data.mul_(0.2)
 
     def forward(self, input):
-        boxes = self.score_layers(input.contiguous())
-        return boxes
+        ih, iw = input.shape[2:]
+        boxes = self.layers(input.contiguous())
+        # boxes = Variable(boxes.data.fill_(0), requires_grad=True)
+        boxes = boxes.view(boxes.shape[0], len(self.pixel_boxes), 4, *boxes.shape[2:])
+        anchor_sizes = Variable(self.pixel_boxes.view(1, len(self.pixel_boxes), 2, 1, 1))
+        anchor_pos_y = torch.arange(ih).type_as(input.data).view(1, 1, -1, 1).add_(0.5)
+        anchor_pos_x = torch.arange(iw).type_as(input.data).view(1, 1, 1, -1).add_(0.5)
+        anchor_pos_y, anchor_pos_x = Variable(anchor_pos_y), Variable(anchor_pos_x)
+        sqrt2 = Variable(boxes.data.new([2]))
+        b_h = sqrt2.pow(boxes[:, :, 2]) * anchor_sizes[:, :, 0]
+        b_w = sqrt2.pow(boxes[:, :, 3]) * anchor_sizes[:, :, 1]
+        b_y = boxes[:, :, 0] * anchor_sizes[:, :, 0] + anchor_pos_y - b_h / 2
+        b_x = boxes[:, :, 1] * anchor_sizes[:, :, 1] + anchor_pos_x - b_w / 2
+        # (B, [y, x, h, w], NBox, H, W)
+        out_boxes = torch.stack([b_y / ih, b_x / iw, b_h / ih, b_w / iw], 1)
+        anchor_part_shape = 1, len(self.pixel_boxes), anchor_pos_y.numel(), anchor_pos_x.numel()
+        anchor_h = anchor_sizes.data[:, :, 0]
+        anchor_w = anchor_sizes.data[:, :, 1]
+        anchor_boxes = torch.cat([
+            anchor_pos_y.data.sub(anchor_h / 2).expand(*anchor_part_shape),
+            anchor_pos_x.data.sub(anchor_w / 2).expand(*anchor_part_shape),
+            anchor_h.expand(*anchor_part_shape),
+            anchor_w.expand(*anchor_part_shape),
+        ], 0)
+        anchor_boxes.div_(self.pixel_boxes.new([ih, iw, ih, iw]).view(4, 1, 1, 1))
+        return out_boxes, anchor_boxes
 
 
 class VerticalLayerSimple(nn.Module):
@@ -260,11 +295,11 @@ class FPN(nn.Module):
     mask_size = 28
     region_size = 7
 
-    def __init__(self, num_scores, num_boxes, out_image_channels=0, num_filters=256):
+    def __init__(self, out_image_channels=0, num_filters=256):
         super().__init__()
 
-        self.mask_pixel_sizes = (1, 2, 4, 8)
-        self.mask_strides = (4, 8, 16, 32)
+        self.mask_pixel_sizes = (1, 2, 4)
+        self.mask_strides = (4, 8, 16)
         self.resnet = resnet50(True)
 
         # Top layer
@@ -299,8 +334,8 @@ class FPN(nn.Module):
         ) if out_image_channels != 0 else None
 
         self.mask_head = MaskHead(num_filters, self.region_size, self.mask_size)
-        self.score_head = ScoreHead(num_filters, num_scores)
-        self.box_head = BoxHead(num_filters, num_boxes)
+        self.box_head = BoxHead(num_filters, self.region_size)
+        self.score_head = ScoreHead(num_filters, len(self.box_head.pixel_boxes))
 
     def freeze_pretrained_layers(self, freeze):
         for p in self.resnet.parameters():
@@ -332,15 +367,14 @@ class FPN(nn.Module):
         if output_unpadding != 0:
             assert output_unpadding % 32 == 0
             ou = output_unpadding
-            p5, p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
-                              ((p5, ou // 32), (p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
+            p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
+                              ((p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
 
-        m5 = self.mask_head(p5), self.score_head(p5), self.box_head(p5)
         m4 = self.mask_head(p4), self.score_head(p4), self.box_head(p4)
         m3 = self.mask_head(p3), self.score_head(p3), self.box_head(p3)
         m2 = self.mask_head(p2), self.score_head(p2), self.box_head(p2)
 
-        return (m2, m3, m4, m5), img
+        return (m2, m3, m4), img
 
     def predict_masks(self, x):
         return self.mask_head.predict_masks(x)

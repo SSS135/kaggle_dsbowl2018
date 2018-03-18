@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Variable
 
 
 def roi_align(input, boxes, crop_size):
@@ -8,15 +9,16 @@ def roi_align(input, boxes, crop_size):
 
     Args:
         input: feature map (1 x C x H x W)
-        boxes: crop boxes in pixels (N x [y, x, h, w])
+        boxes: crop boxes in 0 - 1 range (N x [y, x, h, w])
 
     Returns: crops (N, C, `crop_size`, `crop_size`)
 
     """
     assert input.dim() == 4 and input.shape[0] == 1
-    assert boxes.dim() == 2
+    assert boxes.dim() == 2 and boxes.shape[1] == 4
+    assert isinstance(input, Variable) and not isinstance(boxes, Variable)
 
-    boxes = boxes / torch.cuda.FloatTensor([input.shape[2], input.shape[3], input.shape[2], input.shape[3]])
+    # boxes = boxes / torch.cuda.FloatTensor([input.shape[2], input.shape[3], input.shape[2], input.shape[3]])
 
     tr_y = boxes[:, 2].mul(0.5).add_(boxes[:, 0]).sub_(0.5).mul_(2)
     tr_x = boxes[:, 3].mul(0.5).add_(boxes[:, 1]).sub_(0.5).mul_(2)
@@ -34,7 +36,7 @@ def roi_align(input, boxes, crop_size):
     aff_mat = tr_mat @ sc_mat
     aff_mat = aff_mat[:, :2]
 
-    grid = F.affine_grid(aff_mat, torch.Size((boxes.shape[0], input.shape[1], crop_size, crop_size)))
+    grid = F.affine_grid(Variable(aff_mat), torch.Size((boxes.shape[0], input.shape[1], crop_size, crop_size)))
     input = input.expand(boxes.shape[0], -1, -1, -1)
     x = F.grid_sample(input, grid)
     return x
