@@ -40,3 +40,11 @@ def roi_align(input, boxes, crop_size):
     input = input.expand(boxes.shape[0], -1, -1, -1)
     x = F.grid_sample(input, grid)
     return x
+
+
+def pad_boxes(boxes, padding):
+    assert boxes.dim() == 2 and boxes.shape[1] == 4
+    boxes = boxes.t().clone()
+    boxes[:2] -= padding * boxes[2:]
+    boxes[2:] *= 1 + 2 * padding
+    return boxes.t()

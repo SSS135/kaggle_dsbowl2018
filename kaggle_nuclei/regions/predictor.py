@@ -11,7 +11,8 @@ from tqdm import tqdm
 from ..dataset import resnet_norm_mean, resnet_norm_std, train_pad
 import itertools
 import torchvision.transforms as tsf
-from ..roi_align import roi_align
+from ..roi_align import roi_align, pad_boxes
+from .training import box_padding
 
 img_size_div = 32
 border_pad = 64
@@ -124,6 +125,7 @@ def extract_proposals_from_layer(model, layer, img_size, scale, sigmoid_score_th
         return None
 
     valid_boxes = boxes.contiguous().view(4, -1)[:, valid_idx].t()
+    valid_boxes = pad_boxes(valid_boxes, box_padding)
     resized_masks, valid_positions = batched_mask_prediction(model, features, valid_boxes, img_size, scale)
 
     valid_scores = scores.view(-1)[valid_idx]

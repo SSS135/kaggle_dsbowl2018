@@ -32,46 +32,19 @@ class MaskHead(nn.Module):
         self.region_size = region_size
         self.mask_size = mask_size
 
-        # self.preproc_layers = nn.Sequential(
-        #     # nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-        #     # nn.BatchNorm2d(num_filters, affine=True),
-        #     # nn.ReLU(True),
-        #     # nn.Sequential(
-        #     #     nn.BatchNorm2d(num_filters, affine=True),
-        #     #     nn.ReLU(True),
-        #     #     nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-        #     #     nn.BatchNorm2d(num_filters, affine=True),
-        #     #     nn.ReLU(True),
-        #     #     nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-        #     # ),
-        # )
         self.mask_layers = [
-            ResidualSequential(
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-            )
+            BatchChannels(num_filters),
+
+            nn.BatchNorm2d(num_filters, affine=True),
+            nn.ReLU(True),
+
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters, affine=True),
+            AdaptiveFeaturePooling(FPN.num_feature_groups),
+
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters, affine=True),
+            nn.ReLU(True),
         ]
         cur_size = region_size
         cur_filters = num_filters
@@ -80,27 +53,12 @@ class MaskHead(nn.Module):
             cur_filters //= 2
             cur_size *= 2
             self.mask_layers.append(nn.Sequential(
-                nn.Conv2d(prev_filters, cur_filters, 1, bias=False),
-                nn.Upsample(scale_factor=2),
-                ResidualSequential(
-                    nn.Sequential(
-                        nn.Conv2d(cur_filters, cur_filters, 1, bias=False),
-                        nn.BatchNorm2d(cur_filters, affine=True),
-                        nn.ReLU(True),
-                        nn.Conv2d(cur_filters, cur_filters, 3, 1, 1, bias=False),
-                    ),
-                    nn.Sequential(
-                        nn.Conv2d(cur_filters, cur_filters, 1, bias=False),
-                        nn.BatchNorm2d(cur_filters, affine=True),
-                        nn.ReLU(True),
-                        nn.Conv2d(cur_filters, cur_filters, 3, 1, 1, bias=False),
-                    ),
-                )
+                nn.Upsample(scale_factor=2, mode='bilinear'),
+                nn.Conv2d(prev_filters, cur_filters, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(cur_filters, affine=True),
+                nn.ReLU(True),
             ))
         self.mask_layers.append(nn.Sequential(
-            nn.Conv2d(cur_filters, cur_filters, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(cur_filters, affine=True),
-            nn.ReLU(True),
             nn.Conv2d(cur_filters, 1, 1),
         ))
         self.mask_layers = nn.Sequential(*self.mask_layers)
@@ -109,7 +67,7 @@ class MaskHead(nn.Module):
         return input.contiguous() # self.preproc_layers(input.contiguous())
 
     def predict_masks(self, x):
-        assert x.shape == (x.shape[0], self.num_filters, self.region_size, self.region_size)
+        # assert x.shape == (x.shape[0], self.num_filters, self.region_size, self.region_size)
         return self.mask_layers(x.contiguous())
 
 
@@ -117,32 +75,19 @@ class ScoreHead(nn.Module):
     def __init__(self, num_filters, num_scores, init_foreground_confidence=0.01):
         super().__init__()
         self.score_layers = nn.Sequential(
-            ResidualSequential(
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-            ),
+            BatchChannels(num_filters),
+
+            nn.BatchNorm2d(num_filters, affine=True),
+            nn.ReLU(True),
+
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters, affine=True),
+            AdaptiveFeaturePooling(FPN.num_feature_groups),
+
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters, affine=True),
+            nn.ReLU(True),
+
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
@@ -166,39 +111,27 @@ class BoxHead(nn.Module):
                             for size, scale in itertools.product(sizes, scales)]
         self.pixel_boxes = torch.Tensor(pixel_boxes).float()
         self.layers = nn.Sequential(
-            ResidualSequential(
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(num_filters, num_filters, 1, bias=False),
-                    nn.BatchNorm2d(num_filters, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                ),
-            ),
+            BatchChannels(num_filters),
+
+            nn.BatchNorm2d(num_filters, affine=True),
+            nn.ReLU(True),
+
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters, affine=True),
+            AdaptiveFeaturePooling(FPN.num_feature_groups),
+
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
-            nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1, bias=False),
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters, affine=True),
+            nn.ReLU(True),
+
+            nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1),
         )
         self.layers[-1].weight.data.mul_(0.2)
+        self.layers[-1].bias.data.fill_(0)
 
     def forward(self, input):
         ih, iw = input.shape[2:]
@@ -292,22 +225,56 @@ class BidirectionalLayer(nn.Module):
         return x
 
 
-class GroupMaxout(nn.Module):
-    def __init__(self, groups):
+class AdaptiveFeaturePooling(nn.Module):
+    def __init__(self, num_groups):
         super().__init__()
-        self.groups = groups
+        self.num_groups = num_groups
 
     def forward(self, x):
-        x = x.view(x.shape[0], self.groups, -1, *x.shape[2:])
+        x = x.view(-1, self.num_groups, *x.shape[1:])
         x = x.max(1)[0]
         return x
+
+
+class BatchChannels(nn.Module):
+    def __init__(self, num_filters):
+        super().__init__()
+        self.num_filters = num_filters
+
+    def forward(self, x):
+        return x.view(-1, self.num_filters, *x.shape[2:])
+
+
+class Bottleneck(nn.Module):
+    def __init__(self, num_filters, filter_reduction=2, num_groups=32):
+        super().__init__()
+        nf = num_filters
+        nrf = num_filters // filter_reduction
+        self.layers = nn.Sequential(
+            nn.BatchNorm2d(nf, affine=True),
+            nn.ReLU(True),
+            nn.Conv2d(nf, nrf, 1, bias=False),
+
+            nn.BatchNorm2d(nrf, affine=True),
+            nn.ReLU(True),
+            nn.Conv2d(nrf, nrf, 3, 1, 1, groups=num_groups, bias=False),
+
+            nn.BatchNorm2d(nrf, affine=True),
+            nn.ReLU(True),
+            nn.Conv2d(nrf, nf, 1, bias=False),
+        )
+
+    def forward(self, input):
+        input += self.layers(input)
+        return input
 
 
 class FPN(nn.Module):
     mask_size = 28
     region_size = 7
+    num_feature_groups = 4
 
-    def __init__(self, out_image_channels=0, num_filters=256, enable_bidir=False):
+    def __init__(self, out_image_channels=0, num_filters=256, enable_bidir=True):
         super().__init__()
         self.enable_bidir = enable_bidir
 
@@ -329,27 +296,16 @@ class FPN(nn.Module):
         else:
             self.bidir = None
 
-        num_comb_layers = 4
-        ncf = num_filters * num_comb_layers
-        self.combiner = nn.Sequential(
-            ResidualSequential(
-                nn.Sequential(
-                    nn.Conv2d(ncf, ncf, 1, groups=num_comb_layers, bias=False),
-                    nn.BatchNorm2d(num_filters * num_comb_layers, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(ncf, ncf, 3, 1, 1, groups=num_comb_layers, bias=False),
-                ),
-                nn.Sequential(
-                    nn.Conv2d(ncf, ncf, 1, groups=num_comb_layers, bias=False),
-                    nn.BatchNorm2d(num_filters * num_comb_layers, affine=True),
-                    nn.ReLU(True),
-                    nn.Conv2d(ncf, ncf, 3, 1, 1, groups=num_comb_layers, bias=False),
-                ),
-            ),
-            GroupMaxout(num_comb_layers),
-        )
-
         self.img_net = nn.Sequential(
+            BatchChannels(num_filters),
+
+            nn.BatchNorm2d(num_filters, affine=True),
+            nn.ReLU(True),
+
+            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_filters, affine=True),
+            AdaptiveFeaturePooling(FPN.num_feature_groups),
+
             nn.Conv2d(num_filters, num_filters // 2, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters // 2, affine=True),
             nn.ReLU(True),
@@ -382,6 +338,7 @@ class FPN(nn.Module):
         for idx, base_level in enumerate(levels):
             if idx not in output_indexes:
                 continue
+
             resized_levels = []
             bsh = base_level.shape[2]
             for other_level in levels:
@@ -393,8 +350,9 @@ class FPN(nn.Module):
                 elif osh < bsh:
                     other_level = F.upsample(other_level, scale_factor=bsh // osh, mode='bilinear')
                 resized_levels.append(other_level)
+
             resized_levels = torch.cat(resized_levels, 1)
-            assert resized_levels.shape[1] == base_level.shape[1] * len(levels)
+
             combined_levels.append(resized_levels)
         return combined_levels
 
@@ -430,7 +388,6 @@ class FPN(nn.Module):
             p2, p3, p4, p5 = self.bidir((p2, p3, p4, p5))
 
         p2, p3, p4 = self.combine_levels((p2, p3, p4, p5), (0, 1, 2))
-        p2, p3, p4 = [self.combiner(x) for x in (p2, p3, p4)]
 
         img = self.img_net(p2)[:, :, output_unpadding:-output_unpadding, output_unpadding:-output_unpadding] \
             if self.img_net is not None else None

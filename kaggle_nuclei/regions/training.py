@@ -24,7 +24,10 @@ from torch.nn.modules.batchnorm import _BatchNorm
 import time
 from collections import OrderedDict
 from tensorboardX import SummaryWriter
-from ..roi_align import roi_align
+from ..roi_align import roi_align, pad_boxes
+
+
+box_padding = 0.2
 
 
 # def binary_cross_entropy_with_logits(x, z, reduce=True):
@@ -70,13 +73,13 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
     # model_gen.apply(weights_init)
     # model_disc.apply(weights_init)
 
-    optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.03, momentum=0.9, weight_decay=1e-4)
-    # optimizer_gen = GAdam(get_param_groups(model_gen), lr=3e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
-    #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4)
+    # optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
+    optimizer_gen = GAdam(get_param_groups(model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='weight',
+                          amsgrad=False, nesterov=0.5, weight_decay=1e-4)
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
-    scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
+    # scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
     # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
     best_state_dict = copy_state_dict(model_gen)
@@ -191,7 +194,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 optimizer_gen.step()
                 optimizer_gen.zero_grad()
 
-                scheduler_gen.step()
+                # scheduler_gen.step()
                 # scheduler_disc.step()
 
                 box_iou = aabb_iou(pred_boxes.data, target_boxes.data).mean()
@@ -226,8 +229,8 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
 
 def get_train_pairs(
         model, labels, sdf, img, net_out,
-        pos_sdf_threshold=0.2, neg_sdf_threshold=-0.2,
-        pos_iou_limit=0.5, neg_iou_limit=0.4,
+        pos_sdf_threshold=0.1, neg_sdf_threshold=-0.1,
+        pos_iou_limit=0.4, neg_iou_limit=0.3,
         pos_samples=32, neg_to_pos_ratio=3):
     outputs = []
     for sample_idx in range(labels.shape[0]):
@@ -254,7 +257,7 @@ def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
                            pos_sdf_threshold, neg_sdf_threshold,
                            pos_iou_limit, neg_iou_limit,
                            pos_samples, neg_to_pos_ratio):
-    box_mask = get_object_boxes(labels)
+    box_mask = get_object_boxes(labels, 2)
     resampled_layers = resample_data(labels, sdf, box_mask, img, pixel_sizes)
     outputs = []
     for layer_idx, layer_data in enumerate(zip(net_out, resampled_layers)):
@@ -285,12 +288,16 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     mask_centers_slice = (
         slice(border, -border + 1, stride),
         slice(border, -border + 1, stride))
+    # [fs, fs] - sdf at conv centers
+    sdf_fs = sdf[mask_centers_slice]
     # [(y, x, h, w), fs, fs] - obj boxes at conv centers
     target_boxes_fs = obj_boxes[(slice(None), *mask_centers_slice)].contiguous()
-    target_boxes_fs[0] -= target_boxes_fs[2] * box_padding
-    target_boxes_fs[1] -= target_boxes_fs[3] * box_padding
-    target_boxes_fs[2:] *= 1 + 2 * box_padding
+    # target_boxes_fs[0] -= target_boxes_fs[2] * box_padding
+    # target_boxes_fs[1] -= target_boxes_fs[3] * box_padding
+    # target_boxes_fs[2:] *= 1 + 2 * box_padding
     target_boxes_fs = target_boxes_fs.float() / target_boxes_fs.new(2 * [labels.shape[0], labels.shape[1]]).view(-1, 1, 1)
+
+    assert target_boxes_fs.shape[-1] == anchor_boxes.shape[-1], (target_boxes_fs.shape, anchor_boxes.shape, out_boxes.shape, out_features.shape, labels.shape, sdf.shape, img.shape)
 
     anchor_iou = aabb_iou(
         target_boxes_fs.unsqueeze(1).expand_as(anchor_boxes).contiguous().view(anchor_boxes.shape[0], -1).t(),
@@ -299,8 +306,8 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
 
     # assert sdf_fs.shape == out_masks.shape[-2:], (sdf_fs.shape, out_masks.shape)
 
-    pos_centers_fmap = anchor_iou > pos_iou_limit
-    neg_centers_fmap = anchor_iou < neg_iou_limit
+    pos_centers_fmap = (anchor_iou > pos_iou_limit) & (sdf_fs > pos_sdf_threshold)
+    neg_centers_fmap = (anchor_iou < neg_iou_limit) | (sdf_fs < neg_sdf_threshold)
 
     # TODO: allow zero negative centers
     if pos_centers_fmap.sum() == 0 or neg_centers_fmap.sum() == 0:
@@ -309,14 +316,14 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     pos_centers_fmap_idx_all = pos_centers_fmap.view(-1).nonzero().squeeze()
     neg_centers_fmap_idx_all = neg_centers_fmap.view(-1).nonzero().squeeze()
     pos_centers_fmap_perm = torch.randperm(len(pos_centers_fmap_idx_all))
-    neg_centers_fmap_perm = torch.randperm(len(neg_centers_fmap_idx_all))
+    # neg_centers_fmap_perm = torch.randperm(len(neg_centers_fmap_idx_all))
     pos_centers_fmap_perm = pos_centers_fmap_perm[:pos_samples].contiguous().cuda()
-    neg_centers_fmap_perm = neg_centers_fmap_perm[:len(pos_centers_fmap_perm) * neg_to_pos_ratio].contiguous().cuda()
+    # neg_centers_fmap_perm = neg_centers_fmap_perm[:len(pos_centers_fmap_perm) * neg_to_pos_ratio].contiguous().cuda()
     pos_centers_fmap_idx = pos_centers_fmap_idx_all[pos_centers_fmap_perm]
-    neg_centers_fmap_idx = neg_centers_fmap_idx_all[neg_centers_fmap_perm]
+    # neg_centers_fmap_idx = neg_centers_fmap_idx_all[neg_centers_fmap_perm]
 
-    pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx))
-    pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx))
+    pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx_all))
+    pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx_all))
     pred_scores = torch.cat([pred_pos_scores, pred_neg_scores])
     target_scores = out_scores.data.new(pred_scores.shape[0]).fill_(0)
     target_scores[:pred_pos_scores.shape[0]] = 1
@@ -327,31 +334,35 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
                            .view(target_boxes_fs.shape[0], -1)[:, pos_centers_fmap_idx]
 
     pred_boxes, target_boxes = pred_boxes.t(), target_boxes.t()
+    pred_boxes_pad = pad_boxes(pred_boxes.data, box_padding)
 
-    pred_features = roi_align(out_features.unsqueeze(0), pred_boxes.data, model.region_size)
+    pred_features = roi_align(out_features.unsqueeze(0), pred_boxes_pad, model.region_size)
     img_crops = roi_align(
         Variable(img.unsqueeze(0), volatile=True),
-        pred_boxes.data,
+        pred_boxes_pad,
         model.mask_size
     ).data
 
     pos_center_label_nums = labels[mask_centers_slice].unsqueeze(0).repeat(anchor_boxes.shape[1], 1, 1)
     pos_center_label_nums = pos_center_label_nums.take(pos_centers_fmap_idx)
 
-    target_masks = labels_to_mask_roi_align(labels, pred_boxes.data, pos_center_label_nums, model.mask_size)
+    target_masks = labels_to_mask_roi_align(labels, pred_boxes_pad, pos_center_label_nums, model.mask_size)
 
     # print([x.shape for x in (pred_masks, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops)])
 
     return pred_features, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops
 
 
-def get_object_boxes(labels):
+def get_object_boxes(labels, downsampling=1):
     # [size, size]
     assert labels.dim() == 2
 
     count = labels.max()
     if count == 0:
         return torch.zeros(4, *labels.shape).cuda()
+
+    if downsampling != 1:
+        labels = downscale_nonzero(labels, downsampling)
 
     # [count] with [1, count]
     label_nums = torch.arange(1, count + 1).long().cuda()
@@ -393,6 +404,11 @@ def get_object_boxes(labels):
     box_mask = masks.unsqueeze(1) * box_vec.view(count, 4, 1, 1)
     # [4, size, size], filtered by mask, in format [y, x, h, w] at dim 0
     box_mask = box_mask.sum(0)
+
+    if downsampling != 1:
+        box_mask = F.upsample(box_mask.unsqueeze(0), scale_factor=downsampling, mode='nearest').data.squeeze(0)
+        box_mask *= downsampling
+
     return box_mask
 
 
@@ -426,6 +442,7 @@ def resample_data(labels, sdf, box_mask, img, pixel_sizes):
 
 
 def downscale_nonzero(x, factor):
+    assert x.shape[-1] == x.shape[-2]
     assert x.shape[-1] % factor == 0
     assert 2 <= x.dim() <= 4
     ns = x.shape[-1]
