@@ -8,10 +8,10 @@ import torch.nn.functional as F
 from scipy import ndimage
 from torch.autograd import Variable
 from tqdm import tqdm
-
 from ..dataset import resnet_norm_mean, resnet_norm_std, train_pad
 import itertools
 import torchvision.transforms as tsf
+from ..roi_align import roi_align
 
 img_size_div = 32
 border_pad = 64
@@ -98,10 +98,10 @@ def extract_proposals_from_image(model, img, scale=1, score_threshold=0.8, pad_o
 
     out_layers, out_img = model(Variable(x, volatile=True), train_pad)
     real_scale = s_shape / np.array(img.shape[:2])
-    preds = [extract_proposals_from_layer(model, ly, psz, str, real_scale, score_threshold)
+    preds = [extract_proposals_from_layer(model, ly, out_img.shape[-2:], real_scale, score_threshold)
              for ly, psz, str in zip(out_layers, model.mask_pixel_sizes, model.mask_strides)]
     preds = [p for p in preds if p is not None]
-    preds = [(m, s, (p - np.array(pad_offset) - border_pad) / real_scale)
+    preds = [(m, s, p - (np.array(pad_offset) + border_pad) / real_scale)
              for masks, scores, positions in preds
              for m, s, p in zip(masks, scores, positions)]
     preds = [(m, s, p) for m, s, p in preds if
@@ -112,24 +112,44 @@ def extract_proposals_from_image(model, img, scale=1, score_threshold=0.8, pad_o
     return preds
 
 
-def extract_proposals_from_layer(model, layer, pixel_size, stride, scale, sigmoid_score_threshold):
-    masks, scores = layer[0][0], layer[1].data[0, 0]
-    logit_score_threshold = logit(sigmoid_score_threshold)
-    good_score_mask = scores > logit_score_threshold
-    good_idx = good_score_mask.view(-1).nonzero().squeeze()
-    if len(good_idx) == 0:
+def extract_proposals_from_layer(model, layer, img_size, scale, sigmoid_score_threshold, max_proposals=512):
+    features, scores, boxes = layer[0].data, layer[1].data[0], layer[2][0].data[0]
+    valid_idx = scores.view(-1).topk(max_proposals)[1]
+    valid_idx = valid_idx[scores.view(-1)[valid_idx] > sigmoid_score_threshold]
+    # logit_score_threshold = logit(sigmoid_score_threshold)
+    # valid_scores_mask = scores > logit_score_threshold
+    # valid_idx = valid_scores_mask.view(-1).nonzero().squeeze()
+
+    if len(valid_idx) == 0:
         return None
-    good_masks = center_crop(masks, good_idx, (0, model.region_size), scores.shape[-1])
-    good_masks = model.predict_masks(good_masks)
-    size = (np.array(good_masks.shape[-2:]) * pixel_size / scale).round().astype(int)
-    size = size[0].item(), size[1].item()
-    good_masks = F.upsample(good_masks, size, mode='bilinear').data.squeeze(1)
-    good_scores = scores.view(-1)[good_idx]
-    good_positions = good_score_mask.nonzero() * stride #+ round(FPN.mask_size // 2 * pixel_size)
-    # good_positions = mask_to_indexes(good_score_mask, stride, FPN.mask_size // 2 * pixel_size, image_size)
-    # good_positions = torch.stack([good_idx / scores.shape[-1], good_idx % scores.shape[-2]], 1)
-    # good_positions = good_positions * stride
-    return good_masks.cpu().numpy(), good_scores.cpu().numpy(), good_positions.cpu().numpy()
+
+    valid_boxes = boxes.contiguous().view(4, -1)[:, valid_idx].t()
+    resized_masks, valid_positions = batched_mask_prediction(model, features, valid_boxes, img_size, scale)
+
+    valid_scores = scores.view(-1)[valid_idx]
+    return resized_masks, valid_scores.cpu().numpy(), valid_positions
+
+
+def batched_mask_prediction(model, features, boxes, img_size, scale, batch_size=128):
+    resized_masks = []
+    positions = []
+    for boxes in boxes.split(batch_size, 0):
+        # (NBox x C x RH x RW)
+        feature_crops = roi_align(Variable(features, volatile=True), boxes, model.region_size)
+        # (NBox x 1 x MH x MW)
+        valid_masks = model.predict_masks(feature_crops)
+        # (NBox x 4)
+        boxes_px = boxes * boxes.new(2 * (np.asarray(img_size) / scale).tolist())
+        boxes_px = boxes_px.round_().long()  # TODO: more accurate rounding
+
+        for mask, box in zip(valid_masks, boxes_px):
+            size = box[2:].cpu().numpy().tolist()
+            pos = box[:2].cpu().numpy().tolist()
+            # (H x W)
+            mask = F.upsample(mask.unsqueeze(0), size, mode='bilinear').data.squeeze().cpu().numpy()
+            resized_masks.append(mask)
+            positions.append(pos)
+    return resized_masks, np.array(positions)
 
 
 def logit(x):

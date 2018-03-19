@@ -27,21 +27,21 @@ from tensorboardX import SummaryWriter
 from ..roi_align import roi_align
 
 
-def binary_cross_entropy_with_logits(x, z, reduce=True):
-    bce = x.clamp(min=0) - x * z + x.abs().neg().exp().add(1).log()
-    return bce.mean() if reduce else bce
+# def binary_cross_entropy_with_logits(x, z, reduce=True):
+#     bce = x.clamp(min=0) - x * z + x.abs().neg().exp().add(1).log()
+#     return bce.mean() if reduce else bce
 
 
-def binary_focal_loss_with_logits(input, target, lam=2, alpha=0.25):
-    weight = (target - F.sigmoid(input)).abs().pow(lam) * (1 - (target < 0.5).float().mul(1 - alpha))
+def binary_focal_loss_with_logits(input, target, lam=2):
+    weight = (target - F.sigmoid(input)).abs().pow(lam)
     ce = F.binary_cross_entropy_with_logits(input, target, weight=weight)
     return ce
 
 
-def mse_focal_loss(pred, target, lam=2, reduce=True):
-    mse = F.mse_loss(pred, target, reduce=False)
-    loss = (pred - target).clamp(-1, 1).abs().pow(lam) * mse
-    return loss.mean() if reduce else loss
+# def mse_focal_loss(pred, target, lam=2, reduce=True):
+#     mse = F.mse_loss(pred, target, reduce=False)
+#     loss = (pred - target).clamp(-1, 1).abs().pow(lam) * mse
+#     return loss.mean() if reduce else loss
 
 
 def copy_state_dict(model):
@@ -70,13 +70,13 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
     # model_gen.apply(weights_init)
     # model_disc.apply(weights_init)
 
-    optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.01, momentum=0.9, weight_decay=1e-4)
+    optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.03, momentum=0.9, weight_decay=1e-4)
     # optimizer_gen = GAdam(get_param_groups(model_gen), lr=3e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4)
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
-    # scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
+    scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
     # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
     best_state_dict = copy_state_dict(model_gen)
@@ -101,11 +101,11 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
             for batch_idx, data in enumerate(pbar):
                 img, labels, sdf = [x.cuda() for x in data]
                 x_train = Variable(img)
-                sdf_train = Variable(sdf)
-                mask_train = Variable((labels > 0).float().clamp(0.02, 0.98))
+                sdf_train = Variable(sdf * 0.5 + 0.5)
+                mask_train = Variable((labels > 0).float())
 
-                cont_train = 1 - sdf_train.data ** 2
-                cont_train = (cont_train.clamp(0.9, 1) - 0.9) * 20 - 1
+                cont_train = 1 - sdf ** 2
+                cont_train = (cont_train.clamp(0.9, 1) - 0.9) * 10
                 cont_train = Variable(cont_train)
 
                 optimizer_gen.zero_grad()
@@ -125,10 +125,11 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 batch_masks[bm_idx] += bm_count
 
                 if return_predictions_at_epoch is not None and return_predictions_at_epoch == epoch:
-                    return pred_masks.data.cpu(), target_masks.cpu(), img_crops.cpu(), x_train.data.cpu(), labels.cpu(), model_gen
+                    return pred_masks.data.cpu(), target_masks.cpu(), img_crops.cpu(), \
+                           x_train.data.cpu(), labels.cpu(), model_out_img.data.cpu(), model_gen
 
-                target_masks = Variable(target_masks.clamp(0.02, 0.98))
-                target_scores = Variable(target_scores.clamp(0.02, 0.98))
+                target_masks = Variable(target_masks)
+                target_scores = Variable(target_scores)
                 target_boxes = Variable(target_boxes)
                 # img_crops = Variable(img_crops)
                 #
@@ -176,10 +177,10 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 # # loss_gen += F.mse_loss(gen_d, real_d.detach())
 
                 img_mask_out, img_sdf_out, img_cont_out = model_out_img.split(1, 1)
-                img_mask_out = F.sigmoid(img_mask_out)
-                img_mask_loss = soft_dice_loss(img_mask_out, mask_train)
-                img_sdf_loss = F.mse_loss(img_sdf_out, sdf_train)
-                img_cont_loss = F.mse_loss(img_cont_out, cont_train)
+                # img_mask_out = F.sigmoid(img_mask_out)
+                img_mask_loss = binary_focal_loss_with_logits(img_mask_out, mask_train)
+                img_sdf_loss = binary_focal_loss_with_logits(img_sdf_out, sdf_train)
+                img_cont_loss = binary_focal_loss_with_logits(img_cont_out, cont_train)
 
                 mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks)
                 score_loss = binary_focal_loss_with_logits(pred_scores, target_scores)
@@ -190,7 +191,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 optimizer_gen.step()
                 optimizer_gen.zero_grad()
 
-                # scheduler_gen.step()
+                scheduler_gen.step()
                 # scheduler_disc.step()
 
                 box_iou = aabb_iou(pred_boxes.data, target_boxes.data).mean()
@@ -270,7 +271,7 @@ def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
     return outputs
 
 
-def generate_samples_for_layer(model, out_masks, out_scores, out_boxes, labels, sdf, obj_boxes, img,
+def generate_samples_for_layer(model, out_features, out_scores, out_boxes, labels, sdf, obj_boxes, img,
                                pos_sdf_threshold, neg_sdf_threshold,
                                pos_iou_limit, neg_iou_limit,
                                pos_samples, neg_to_pos_ratio, box_padding=0.15):
@@ -308,14 +309,14 @@ def generate_samples_for_layer(model, out_masks, out_scores, out_boxes, labels, 
     pos_centers_fmap_idx_all = pos_centers_fmap.view(-1).nonzero().squeeze()
     neg_centers_fmap_idx_all = neg_centers_fmap.view(-1).nonzero().squeeze()
     pos_centers_fmap_perm = torch.randperm(len(pos_centers_fmap_idx_all))
-    # neg_centers_fmap_perm = torch.randperm(len(neg_centers_fmap_idx_all))
+    neg_centers_fmap_perm = torch.randperm(len(neg_centers_fmap_idx_all))
     pos_centers_fmap_perm = pos_centers_fmap_perm[:pos_samples].contiguous().cuda()
-    # neg_centers_fmap_perm = neg_centers_fmap_perm[:len(pos_centers_fmap_perm) * neg_to_pos_ratio].contiguous().cuda()
+    neg_centers_fmap_perm = neg_centers_fmap_perm[:len(pos_centers_fmap_perm) * neg_to_pos_ratio].contiguous().cuda()
     pos_centers_fmap_idx = pos_centers_fmap_idx_all[pos_centers_fmap_perm]
-    # neg_centers_fmap_idx = neg_centers_fmap_idx_all[neg_centers_fmap_perm]
+    neg_centers_fmap_idx = neg_centers_fmap_idx_all[neg_centers_fmap_perm]
 
-    pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx_all))
-    pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx_all))
+    pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx))
+    pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx))
     pred_scores = torch.cat([pred_pos_scores, pred_neg_scores])
     target_scores = out_scores.data.new(pred_scores.shape[0]).fill_(0)
     target_scores[:pred_pos_scores.shape[0]] = 1
@@ -327,7 +328,7 @@ def generate_samples_for_layer(model, out_masks, out_scores, out_boxes, labels, 
 
     pred_boxes, target_boxes = pred_boxes.t(), target_boxes.t()
 
-    pred_masks = roi_align(out_masks.unsqueeze(0), pred_boxes.data, model.region_size)
+    pred_features = roi_align(out_features.unsqueeze(0), pred_boxes.data, model.region_size)
     img_crops = roi_align(
         Variable(img.unsqueeze(0), volatile=True),
         pred_boxes.data,
@@ -341,7 +342,7 @@ def generate_samples_for_layer(model, out_masks, out_scores, out_boxes, labels, 
 
     # print([x.shape for x in (pred_masks, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops)])
 
-    return pred_masks, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops
+    return pred_features, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops
 
 
 def get_object_boxes(labels):

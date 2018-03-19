@@ -11,6 +11,7 @@ from torchvision.models.resnet import resnet50, model_urls
 from ..skip_connections import ResidualSequential, DenseSequential
 import itertools
 import math
+from pretrainedmodels import resnext101_32x4d, resnext101_64x4d
 
 
 # def weights_init(m):
@@ -213,11 +214,12 @@ class BoxHead(nn.Module):
         b_w = sqrt2.pow(boxes[:, :, 3]) * anchor_sizes[:, :, 1]
         b_y = boxes[:, :, 0] * anchor_sizes[:, :, 0] + anchor_pos_y - b_h / 2
         b_x = boxes[:, :, 1] * anchor_sizes[:, :, 1] + anchor_pos_x - b_w / 2
-        # (B, [y, x, h, w], NBox, H, W)
+        # (B, yxhw, NBox, H, W)
         out_boxes = torch.stack([b_y / ih, b_x / iw, b_h / ih, b_w / iw], 1)
         anchor_part_shape = 1, len(self.pixel_boxes), anchor_pos_y.numel(), anchor_pos_x.numel()
         anchor_h = anchor_sizes.data[:, :, 0]
         anchor_w = anchor_sizes.data[:, :, 1]
+        # (yxhw, NBox, H, W)
         anchor_boxes = torch.cat([
             anchor_pos_y.data.sub(anchor_h / 2).expand(*anchor_part_shape),
             anchor_pos_x.data.sub(anchor_w / 2).expand(*anchor_part_shape),
@@ -290,28 +292,62 @@ class BidirectionalLayer(nn.Module):
         return x
 
 
+class GroupMaxout(nn.Module):
+    def __init__(self, groups):
+        super().__init__()
+        self.groups = groups
+
+    def forward(self, x):
+        x = x.view(x.shape[0], self.groups, -1, *x.shape[2:])
+        x = x.max(1)[0]
+        return x
+
+
 class FPN(nn.Module):
     mask_size = 28
     region_size = 7
 
-    def __init__(self, out_image_channels=0, num_filters=256):
+    def __init__(self, out_image_channels=0, num_filters=256, enable_bidir=False):
         super().__init__()
+        self.enable_bidir = enable_bidir
 
         self.mask_pixel_sizes = (1, 2, 4)
         self.mask_strides = (4, 8, 16)
-        self.resnet = resnet50(True)
-        self._pretrained_frozen = False
+        self.resnet = resnext101_32x4d()
 
         # Top layer
-        self.toplayer = nn.Conv2d(2048, num_filters, kernel_size=1, stride=1, padding=0)  # Reduce channels
+        self.toplayer = nn.Conv2d(2048, num_filters, kernel_size=1, stride=1, padding=0, bias=False)  # Reduce channels
 
         # Lateral layers
-        self.latlayer1 = nn.Conv2d(1024, num_filters, kernel_size=1, stride=1, padding=0)
-        self.latlayer2 = nn.Conv2d(512, num_filters, kernel_size=1, stride=1, padding=0)
-        self.latlayer3 = nn.Conv2d(256, num_filters, kernel_size=1, stride=1, padding=0)
-        self.latlayer4 = nn.Conv2d(64, num_filters, kernel_size=1, stride=1, padding=0)
+        self.latlayer1 = nn.Conv2d(1024, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        self.latlayer2 = nn.Conv2d(512, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        self.latlayer3 = nn.Conv2d(256, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        # self.latlayer4 = nn.Conv2d(64, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
 
-        self.bidir = BidirectionalLayer(num_filters)
+        if self.enable_bidir:
+            self.bidir = BidirectionalLayer(num_filters)
+        else:
+            self.bidir = None
+
+        num_comb_layers = 4
+        ncf = num_filters * num_comb_layers
+        self.combiner = nn.Sequential(
+            ResidualSequential(
+                nn.Sequential(
+                    nn.Conv2d(ncf, ncf, 1, groups=num_comb_layers, bias=False),
+                    nn.BatchNorm2d(num_filters * num_comb_layers, affine=True),
+                    nn.ReLU(True),
+                    nn.Conv2d(ncf, ncf, 3, 1, 1, groups=num_comb_layers, bias=False),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(ncf, ncf, 1, groups=num_comb_layers, bias=False),
+                    nn.BatchNorm2d(num_filters * num_comb_layers, affine=True),
+                    nn.ReLU(True),
+                    nn.Conv2d(ncf, ncf, 3, 1, 1, groups=num_comb_layers, bias=False),
+                ),
+            ),
+            GroupMaxout(num_comb_layers),
+        )
 
         self.img_net = nn.Sequential(
             nn.Conv2d(num_filters, num_filters // 2, 3, 1, 1, bias=False),
@@ -338,43 +374,72 @@ class FPN(nn.Module):
         self.score_head = ScoreHead(num_filters, len(self.box_head.pixel_boxes))
 
     def freeze_pretrained_layers(self, freeze):
-        self._pretrained_frozen = freeze
         for p in self.resnet.parameters():
             p.requires_grad = not freeze
 
+    def combine_levels(self, levels, output_indexes):
+        combined_levels = []
+        for idx, base_level in enumerate(levels):
+            if idx not in output_indexes:
+                continue
+            resized_levels = []
+            bsh = base_level.shape[2]
+            for other_level in levels:
+                osh = other_level.shape[2]
+                assert other_level.dim() == 4
+                assert other_level.shape[2] == other_level.shape[3]
+                if osh > bsh:
+                    other_level = F.max_pool2d(other_level, osh // bsh)
+                elif osh < bsh:
+                    other_level = F.upsample(other_level, scale_factor=bsh // osh, mode='bilinear')
+                resized_levels.append(other_level)
+            resized_levels = torch.cat(resized_levels, 1)
+            assert resized_levels.shape[1] == base_level.shape[1] * len(levels)
+            combined_levels.append(resized_levels)
+        return combined_levels
+
     def forward(self, x, output_unpadding=0):
-        if self._pretrained_frozen:
-            x = Variable(x.data, volatile=True)
-        c1 = self.resnet.conv1(x)
-        c1 = self.resnet.bn1(c1)
-        c1 = self.resnet.relu(c1)
-        c1 = self.resnet.maxpool(c1)
+        # c1 = self.resnet.conv1(x)
+        # c1 = self.resnet.bn1(c1)
+        # c1 = self.resnet.relu(c1)
+        # c1 = self.resnet.maxpool(c1)
+        #
+        # c2 = self.resnet.layer1(c1)
+        # c3 = self.resnet.layer2(c2)
+        # c4 = self.resnet.layer3(c3)
+        # c5 = self.resnet.layer4(c4)
 
-        c2 = self.resnet.layer1(c1)
-        c3 = self.resnet.layer2(c2)
-        c4 = self.resnet.layer3(c3)
-        c5 = self.resnet.layer4(c4)
+        c1 = self.resnet.features[0](x)
+        c1 = self.resnet.features[1](c1)
+        c1 = self.resnet.features[2](c1)
+        c1 = self.resnet.features[3](c1)
 
-        if self._pretrained_frozen:
-            c1, c2, c3, c4, c5 = [Variable(c.data) for c in (c1, c2, c3, c4, c5)]
+        c2 = self.resnet.features[4](c1)
+        c3 = self.resnet.features[5](c2)
+        c4 = self.resnet.features[6](c3)
+        c5 = self.resnet.features[7](c4)
 
         # Top-down
         p5 = self.toplayer(c5)
         p4 = self.latlayer1(c4)
         p3 = self.latlayer2(c3)
         p2 = self.latlayer3(c2)
-        p1 = self.latlayer4(c1)
+        # p1 = self.latlayer4(c1)
 
-        p1, p2, p3, p4, p5 = self.bidir((p1, p2, p3, p4, p5))
+        if self.enable_bidir:
+            p2, p3, p4, p5 = self.bidir((p2, p3, p4, p5))
 
-        img = self.img_net(p1)[:, :, output_unpadding:-output_unpadding, output_unpadding:-output_unpadding] \
+        p2, p3, p4 = self.combine_levels((p2, p3, p4, p5), (0, 1, 2))
+        p2, p3, p4 = [self.combiner(x) for x in (p2, p3, p4)]
+
+        img = self.img_net(p2)[:, :, output_unpadding:-output_unpadding, output_unpadding:-output_unpadding] \
             if self.img_net is not None else None
 
         if output_unpadding != 0:
             assert output_unpadding % 32 == 0
             ou = output_unpadding
-            p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
-                              ((p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
+            p5, p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
+                              ((p5, ou // 32), (p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
 
         m4 = self.mask_head(p4), self.score_head(p4), self.box_head(p4)
         m3 = self.mask_head(p3), self.score_head(p3), self.box_head(p3)
