@@ -32,10 +32,10 @@ def binary_cross_entropy_with_logits(x, z, reduce=True):
     return bce.mean() if reduce else bce
 
 
-def binary_focal_loss_with_logits(pred, target, lam=2, reduce=True):
-    ce = binary_cross_entropy_with_logits(pred, target, False)
-    loss = (target - F.sigmoid(pred)).abs().pow(lam) * ce
-    return loss.mean() if reduce else loss
+def binary_focal_loss_with_logits(input, target, lam=2, alpha=0.25):
+    weight = (target - F.sigmoid(input)).abs().pow(lam) * (1 - (target < 0.5).float().mul(1 - alpha))
+    ce = F.binary_cross_entropy_with_logits(input, target, weight=weight)
+    return ce
 
 
 def mse_focal_loss(pred, target, lam=2, reduce=True):
@@ -305,17 +305,17 @@ def generate_samples_for_layer(model, out_masks, out_scores, out_boxes, labels, 
     if pos_centers_fmap.sum() == 0 or neg_centers_fmap.sum() == 0:
         return None
 
-    pos_centers_fmap_idx = pos_centers_fmap.view(-1).nonzero().squeeze()
-    neg_centers_fmap_idx = neg_centers_fmap.view(-1).nonzero().squeeze()
-    pos_centers_fmap_perm = torch.randperm(len(pos_centers_fmap_idx))
-    neg_centers_fmap_perm = torch.randperm(len(neg_centers_fmap_idx))
+    pos_centers_fmap_idx_all = pos_centers_fmap.view(-1).nonzero().squeeze()
+    neg_centers_fmap_idx_all = neg_centers_fmap.view(-1).nonzero().squeeze()
+    pos_centers_fmap_perm = torch.randperm(len(pos_centers_fmap_idx_all))
+    # neg_centers_fmap_perm = torch.randperm(len(neg_centers_fmap_idx_all))
     pos_centers_fmap_perm = pos_centers_fmap_perm[:pos_samples].contiguous().cuda()
-    neg_centers_fmap_perm = neg_centers_fmap_perm[:len(pos_centers_fmap_perm) * neg_to_pos_ratio].contiguous().cuda()
-    pos_centers_fmap_idx = pos_centers_fmap_idx[pos_centers_fmap_perm]
-    neg_centers_fmap_idx = neg_centers_fmap_idx[neg_centers_fmap_perm]
-    pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx))
-    pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx))
+    # neg_centers_fmap_perm = neg_centers_fmap_perm[:len(pos_centers_fmap_perm) * neg_to_pos_ratio].contiguous().cuda()
+    pos_centers_fmap_idx = pos_centers_fmap_idx_all[pos_centers_fmap_perm]
+    # neg_centers_fmap_idx = neg_centers_fmap_idx_all[neg_centers_fmap_perm]
 
+    pred_pos_scores = out_scores.take(Variable(pos_centers_fmap_idx_all))
+    pred_neg_scores = out_scores.take(Variable(neg_centers_fmap_idx_all))
     pred_scores = torch.cat([pred_pos_scores, pred_neg_scores])
     target_scores = out_scores.data.new(pred_scores.shape[0]).fill_(0)
     target_scores[:pred_pos_scores.shape[0]] = 1

@@ -148,8 +148,7 @@ class ScoreHead(nn.Module):
 
             nn.Conv2d(num_filters, num_scores, 1),
         )
-
-        # self.score_layers[-1].bias.data.fill_(-math.log((1 - init_foreground_confidence) / init_foreground_confidence))
+        self.score_layers[-1].bias.data.fill_(-math.log((1 - init_foreground_confidence) / init_foreground_confidence))
 
     def forward(self, input):
         score = self.score_layers(input.contiguous())
@@ -301,6 +300,7 @@ class FPN(nn.Module):
         self.mask_pixel_sizes = (1, 2, 4)
         self.mask_strides = (4, 8, 16)
         self.resnet = resnet50(True)
+        self._pretrained_frozen = False
 
         # Top layer
         self.toplayer = nn.Conv2d(2048, num_filters, kernel_size=1, stride=1, padding=0)  # Reduce channels
@@ -338,10 +338,13 @@ class FPN(nn.Module):
         self.score_head = ScoreHead(num_filters, len(self.box_head.pixel_boxes))
 
     def freeze_pretrained_layers(self, freeze):
+        self._pretrained_frozen = freeze
         for p in self.resnet.parameters():
             p.requires_grad = not freeze
 
     def forward(self, x, output_unpadding=0):
+        if self._pretrained_frozen:
+            x = Variable(x.data, volatile=True)
         c1 = self.resnet.conv1(x)
         c1 = self.resnet.bn1(c1)
         c1 = self.resnet.relu(c1)
@@ -351,6 +354,9 @@ class FPN(nn.Module):
         c3 = self.resnet.layer2(c2)
         c4 = self.resnet.layer3(c3)
         c5 = self.resnet.layer4(c4)
+
+        if self._pretrained_frozen:
+            c1, c2, c3, c4, c5 = [Variable(c.data) for c in (c1, c2, c3, c4, c5)]
 
         # Top-down
         p5 = self.toplayer(c5)
