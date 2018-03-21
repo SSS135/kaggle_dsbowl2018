@@ -25,6 +25,7 @@ import time
 from collections import OrderedDict
 from tensorboardX import SummaryWriter
 from ..roi_align import roi_align, pad_boxes
+import dill
 
 
 box_padding = 0.2
@@ -34,41 +35,44 @@ box_padding = 0.2
 #     bce = x.clamp(min=0) - x * z + x.abs().neg().exp().add(1).log()
 #     return bce.mean() if reduce else bce
 
-# def binary_focal_loss_with_logits(x, t, gamma=2, alpha=0.25):
-#     p = x.sigmoid()
-#     pt = p * t + (1 - p) * (1 - t)  # pt = p if t > 0 else 1-p
-#     w = (1 - alpha) * t + alpha * (1 - t)  # w = 1-alpha if t > 0 else alpha
-#     w = w * (1 - pt).pow(gamma)
-#     return F.binary_cross_entropy_with_logits(x, t, w)
+def binary_focal_loss_with_logits(x, t, gamma=2, alpha=0.25):
+    p = x.sigmoid()
+    pt = p * t + (1 - p) * (1 - t)  # pt = p if t > 0 else 1-p
+    w = (1 - alpha) * t + alpha * (1 - t)  # w = 1-alpha if t > 0 else alpha
+    w = w * (1 - pt).pow(gamma)
+    return F.binary_cross_entropy_with_logits(x, t, w)
 
 
-def binary_focal_loss_with_logits(input, target, lam=2):
-    weight = (target - F.sigmoid(input)).abs().pow(lam)
-    ce = F.binary_cross_entropy_with_logits(input, target, weight=weight)
-    return ce
+# def binary_focal_loss_with_logits(input, target, lam=2):
+#     weight = (target - F.sigmoid(input)).abs().pow(lam)
+#     ce = F.binary_cross_entropy_with_logits(input, target, weight=weight)
+#     return ce
 
 
-# def mse_focal_loss(pred, target, lam=2, reduce=True):
-#     mse = F.mse_loss(pred, target, reduce=False)
-#     loss = (pred - target).clamp(-1, 1).abs().pow(lam) * mse
-#     return loss.mean() if reduce else loss
+def mse_focal_loss(pred, target, focal_threshold, lam=2):
+    mse = F.mse_loss(pred, target, reduce=False)
+    w = (pred - target).clamp(-focal_threshold, focal_threshold).div(focal_threshold).abs().pow(lam).detach()
+    loss = w * mse
+    return loss.mean()
 
 
-def copy_state_dict(model):
-    return copy.deepcopy(OrderedDict((k, v.cpu()) for k, v in model.state_dict().items()))
+# def copy_state_dict(model):
+#     return copy.deepcopy(OrderedDict((k, v.cpu()) for k, v in model.state_dict().items()))
 
 
-def batch_to_instance_norm(model):
+def batch_to_instance_norm(model, inst_norm_class=nn.InstanceNorm2d):
     for module in model.modules():
         for name, child in module.named_children():
             if isinstance(child, nn.BatchNorm2d):
-                norm = nn.InstanceNorm2d(child.num_features, affine=child.affine)
+                norm = inst_norm_class(child.num_features, child.eps, child.momentum, child.affine)
                 norm.weight = child.weight
                 norm.bias = child.bias
-                setattr(module, name, child)
+                norm.running_mean = child.running_mean
+                norm.running_var = child.running_var
+                setattr(module, name, norm)
 
 
-def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None):
+def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None, model_save_path=None):
     dataset = NucleiDataset(train_data)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=1, pin_memory=True)
 
@@ -89,8 +93,8 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
     scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
     # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
-    best_state_dict = copy_state_dict(model_gen)
-    best_score = -math.inf
+    # best_state_dict = copy_state_dict(model_gen)
+    # best_score = -math.inf
 
     # one = Variable(torch.cuda.FloatTensor([0.95]))
     # zero = Variable(torch.cuda.FloatTensor([0.05]))
@@ -105,10 +109,15 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
         with tqdm(dataloader) as pbar:
             model_gen.freeze_pretrained_layers(epoch < pretrain_epochs)
             score_fscore_sum, t_iou_sum, f_iou_sum, box_iou_sum = 0, 0, 0, 0
+            optim_iter = 0
 
             batch_masks = np.zeros(len(model_gen.mask_pixel_sizes))
 
             for batch_idx, data in enumerate(pbar):
+                optimizer_gen.zero_grad()
+                scheduler_gen.step()
+                # scheduler_disc.step()
+
                 img, labels, sdf = [x.cuda() for x in data]
                 x_train = Variable(img)
                 sdf_train = Variable(sdf * 0.5 + 0.5)
@@ -118,13 +127,12 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 cont_train = (cont_train.clamp(0.9, 1) - 0.9) * 10
                 cont_train = Variable(cont_train)
 
-                optimizer_gen.zero_grad()
-
                 model_out_layers, model_out_img = model_gen(x_train, train_pad)
                 train_pairs = get_train_pairs(
                     model_gen, labels, sdf, img[:, :, train_pad:-train_pad, train_pad:-train_pad], model_out_layers)
 
                 if train_pairs is None:
+                    optimizer_gen.zero_grad()
                     continue
 
                 pred_features, target_masks, pred_scores, target_scores, \
@@ -201,9 +209,6 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 optimizer_gen.step()
                 optimizer_gen.zero_grad()
 
-                scheduler_gen.step()
-                # scheduler_disc.step()
-
                 box_iou = aabb_iou(pred_boxes, target_boxes).mean()
 
                 pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
@@ -215,22 +220,23 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 f_iou = iou(pred_masks.data > 0, target_masks.data > 0.5)
                 t_iou = threshold_iou(f_iou)
 
-                iter = batch_idx + 1
+                optim_iter += 1
                 score_fscore_sum += score_fscore
                 f_iou_sum += f_iou.mean()
                 t_iou_sum += t_iou.mean()
                 box_iou_sum += box_iou
                 pbar.set_postfix(
-                    _E=epoch, SF=score_fscore_sum / iter,
-                    BIoU=box_iou_sum / iter,
-                    MIoU=f_iou_sum / iter, MIoU_T=t_iou_sum / iter,
-                    MPS=np.round(batch_masks / iter / img.shape[0], 1), refresh=False)
+                    _E=epoch, SF=score_fscore_sum / optim_iter, BIoU=box_iou_sum / optim_iter,
+                    MIoU=f_iou_sum / optim_iter, MIoU_T=t_iou_sum / optim_iter,
+                    MPS=np.round(batch_masks / (batch_idx + 1) / img.shape[0], 1), refresh=False)
 
-            score = t_iou_sum
-            if score > best_score:
-                best_score = score
-                best_state_dict = copy_state_dict(model_gen)
-    model_gen.load_state_dict(best_state_dict)
+            if model_save_path is not None:
+                torch.save(model_save_path, model_gen, pickle_module=dill)
+            # score = t_iou_sum
+            # if score > best_score:
+            #     best_score = score
+            #     best_state_dict = copy_state_dict(model_gen)
+    # model_gen.load_state_dict(best_state_dict)
     return model_gen
 
 
@@ -390,12 +396,13 @@ def get_object_boxes(labels, downsampling=1):
     # [size, size]
     assert labels.dim() == 2
 
-    count = labels.max()
-    if count == 0:
-        return torch.zeros(4, *labels.shape).cuda()
-
+    src_labels_shape = labels.shape
     if downsampling != 1:
         labels = downscale_nonzero(labels, downsampling)
+
+    count = labels.max()
+    if count == 0:
+        return torch.zeros(4, *src_labels_shape).cuda()
 
     # [count] with [1, count]
     label_nums = torch.arange(1, count + 1).long().cuda()

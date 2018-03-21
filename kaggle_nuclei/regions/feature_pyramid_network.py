@@ -8,10 +8,11 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from torch.nn.modules.instancenorm import _InstanceNorm
 from torch.utils import model_zoo
 from torchvision.models.resnet import resnet50, model_urls
-from ..skip_connections import ResidualSequential, DenseSequential
 import itertools
 import math
-from pretrainedmodels import resnext101_32x4d, resnext101_64x4d
+from pretrainedmodels import resnext101_32x4d, resnext101_64x4d, dpn92
+from optfn.batch_renormalization import BatchReNorm2d
+from optfn.shuffle_conv import ShuffleConv2d
 
 
 class MaskHead(nn.Module):
@@ -24,16 +25,12 @@ class MaskHead(nn.Module):
 
         self.conv_mask_layers = [
             BatchChannels(num_filters),
-
-            nn.BatchNorm2d(num_filters, affine=True),
-            nn.ReLU(True),
-
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            ResBlock(num_filters),
             nn.BatchNorm2d(num_filters, affine=True),
 
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
         ]
@@ -45,7 +42,7 @@ class MaskHead(nn.Module):
             cur_size *= 2
             self.conv_mask_layers.append(nn.Sequential(
                 nn.Upsample(scale_factor=2, mode='bilinear'),
-                nn.Conv2d(prev_filters, cur_filters, 3, 1, 1, bias=False),
+                ShuffleConv2d(prev_filters, cur_filters, 3, 1, 1, bias=False, groups=4),
                 nn.BatchNorm2d(cur_filters, affine=True),
                 nn.ReLU(True),
             ))
@@ -66,20 +63,14 @@ class ScoreHead(nn.Module):
         super().__init__()
         self.score_layers = nn.Sequential(
             BatchChannels(num_filters),
-
-            nn.BatchNorm2d(num_filters, affine=True),
-            nn.ReLU(True),
-
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters, affine=True),
-
+            ResBlock(num_filters),
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
@@ -104,20 +95,14 @@ class BoxHead(nn.Module):
         self.pixel_boxes = torch.Tensor(pixel_boxes).float()
         self.layers = nn.Sequential(
             BatchChannels(num_filters),
-
-            nn.BatchNorm2d(num_filters, affine=True),
-            nn.ReLU(True),
-
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters, affine=True),
-
+            ResBlock(num_filters),
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+            ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
             nn.BatchNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
@@ -158,20 +143,14 @@ class VerticalLayerSimple(nn.Module):
     def __init__(self, num_filters):
         super().__init__()
         c_in = c_out = num_filters * 2
-        c_red = num_filters
-        num_groups = 32
         self.net = nn.Sequential(
             nn.BatchNorm2d(c_in, affine=True),
             nn.ReLU(True),
-            nn.Conv2d(c_in, c_red, 1, bias=False),
+            ShuffleConv2d(c_in, c_in, 3, 1, 1, bias=False, groups=4),
 
-            nn.BatchNorm2d(c_red, affine=True),
+            nn.BatchNorm2d(c_in, affine=True),
             nn.ReLU(True),
-            nn.Conv2d(c_red, c_red, 3, 1, 1, groups=num_groups, bias=False),
-
-            nn.BatchNorm2d(c_red, affine=True),
-            nn.ReLU(True),
-            nn.Conv2d(c_red, c_out, 1, bias=False),
+            ShuffleConv2d(c_in, c_out, 3, 1, 1, bias=False, groups=4),
         )
 
     def forward(self, input_layers):
@@ -244,6 +223,27 @@ class BatchChannels(nn.Module):
         return x.view(-1, self.num_filters, *x.shape[2:])
 
 
+class ResBlock(nn.Module):
+    def __init__(self, c_in, c_out=None):
+        super().__init__()
+        c_out = c_in if c_out is None else c_out
+        self.shortcut = nn.Conv2d(c_in, c_out, 1, bias=False) if c_in != c_out else (lambda x: x)
+        self.layers = nn.Sequential(
+            nn.BatchNorm2d(c_in, affine=True),
+            nn.ReLU(True),
+            ShuffleConv2d(c_in, c_in, 3, 1, 1, bias=False, groups=4),
+
+            nn.BatchNorm2d(c_in, affine=True),
+            nn.ReLU(True),
+            ShuffleConv2d(c_in, c_out, 3, 1, 1, bias=False, groups=4),
+        )
+
+    def forward(self, input):
+        x = self.layers(input)
+        x += self.shortcut(input)
+        return x
+
+
 class FPN(nn.Module):
     mask_size = 28
     region_size = 7
@@ -255,15 +255,24 @@ class FPN(nn.Module):
 
         self.mask_pixel_sizes = (1, 2, 4)
         self.mask_strides = (4, 8, 16)
-        self.resnet = resnext101_32x4d()
+        # rn = resnet50(True)
+        # self.resnet = nn.ModuleList([rn.conv1, rn.bn1, rn.relu, rn.maxpool, rn.layer1, rn.layer2, rn.layer3, rn.layer4])
+        # self.resnet = nn.ModuleList(list(resnext101_32x4d().features)[:8])
+        dpn = list(dpn92().features)
+        self.resnet = nn.ModuleList([
+            nn.Sequential(*dpn[:4]),
+            nn.Sequential(*dpn[4:8]),
+            nn.Sequential(*dpn[8:28]),
+            nn.Sequential(*dpn[28:31])
+        ])
 
         # Top layer
-        self.toplayer = nn.Conv2d(2048, num_filters, kernel_size=1, stride=1, padding=0, bias=False)  # Reduce channels
+        self.toplayer = nn.Conv2d(2688, num_filters, kernel_size=1, stride=1, padding=0, bias=False)  # Reduce channels
 
         # Lateral layers
-        self.latlayer1 = nn.Conv2d(1024, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
-        self.latlayer2 = nn.Conv2d(512, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
-        self.latlayer3 = nn.Conv2d(256, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        self.latlayer1 = nn.Conv2d(1552, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        self.latlayer2 = nn.Conv2d(704, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        self.latlayer3 = nn.Conv2d(336, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
         # self.latlayer4 = nn.Conv2d(64, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
 
         if self.enable_bidir:
@@ -274,24 +283,22 @@ class FPN(nn.Module):
         if out_image_channels != 0:
             self.img_net = nn.Sequential(
                 BatchChannels(num_filters),
-
-                nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(num_filters, affine=True),
+                ResBlock(num_filters),
                 AdaptiveFeaturePooling(FPN.num_feature_groups),
 
-                nn.Conv2d(num_filters, num_filters // 2, 3, 1, 1, bias=False),
+                ShuffleConv2d(num_filters, num_filters // 2, 3, 1, 1, bias=False, groups=4),
                 nn.BatchNorm2d(num_filters // 2, affine=True),
                 nn.ReLU(True),
 
                 nn.Upsample(scale_factor=2),
 
-                nn.Conv2d(num_filters // 2, num_filters // 4, 3, 1, 1, bias=False),
+                ShuffleConv2d(num_filters // 2, num_filters // 4, 3, 1, 1, bias=False, groups=4),
                 nn.BatchNorm2d(num_filters // 4, affine=True),
                 nn.ReLU(True),
 
                 nn.Upsample(scale_factor=2),
 
-                nn.Conv2d(num_filters // 4, num_filters // 8, 3, 1, 1, bias=False),
+                ShuffleConv2d(num_filters // 4, num_filters // 8, 3, 1, 1, bias=False, groups=4),
                 nn.BatchNorm2d(num_filters // 8, affine=True),
                 nn.ReLU(True),
 
@@ -307,6 +314,10 @@ class FPN(nn.Module):
         self.score_head = ScoreHead(num_filters, len(self.box_head.pixel_boxes))
 
     def freeze_pretrained_layers(self, freeze):
+        self.resnet.train(not freeze)
+        for module in self.resnet.modules():
+            if isinstance(module, _InstanceNorm):
+                module.use_running_stats = freeze
         for p in self.resnet.parameters():
             p.requires_grad = not freeze
 
@@ -334,15 +345,18 @@ class FPN(nn.Module):
         return combined_levels
 
     def forward(self, x, output_unpadding=0):
-        c1 = self.resnet.features[0](x)
-        c1 = self.resnet.features[1](c1)
-        c1 = self.resnet.features[2](c1)
-        c1 = self.resnet.features[3](c1)
+        if not self.resnet.training:
+            x = Variable(x.data, volatile=True)
 
-        c2 = self.resnet.features[4](c1)
-        c3 = self.resnet.features[5](c2)
-        c4 = self.resnet.features[6](c3)
-        c5 = self.resnet.features[7](c4)
+        c2 = self.resnet[0](x)
+        c3 = self.resnet[1](c2)
+        c4 = self.resnet[2](c3)
+        c5 = self.resnet[3](c4)
+
+        c2, c3, c4, c5 = [torch.cat(t, 1) for t in (c2, c3, c4, c5)]
+
+        if not self.resnet.training:
+            c2, c3, c4, c5 = [Variable(v.data) for v in (c2, c3, c4, c5)]
 
         # Top-down
         p5 = self.toplayer(c5)

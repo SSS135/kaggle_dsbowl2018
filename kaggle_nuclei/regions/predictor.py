@@ -132,7 +132,7 @@ def extract_proposals_from_layer(model, layer, img_size, scale, sigmoid_score_th
     return resized_masks, valid_scores.cpu().numpy(), valid_positions
 
 
-def batched_mask_prediction(model, features, boxes, img_size, scale, batch_size=128):
+def batched_mask_prediction(model, features, boxes, img_size, scale, batch_size=32):
     resized_masks = []
     positions = []
     for boxes in boxes.split(batch_size, 0):
