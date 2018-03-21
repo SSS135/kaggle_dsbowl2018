@@ -34,6 +34,13 @@ box_padding = 0.2
 #     bce = x.clamp(min=0) - x * z + x.abs().neg().exp().add(1).log()
 #     return bce.mean() if reduce else bce
 
+# def binary_focal_loss_with_logits(x, t, gamma=2, alpha=0.25):
+#     p = x.sigmoid()
+#     pt = p * t + (1 - p) * (1 - t)  # pt = p if t > 0 else 1-p
+#     w = (1 - alpha) * t + alpha * (1 - t)  # w = 1-alpha if t > 0 else alpha
+#     w = w * (1 - pt).pow(gamma)
+#     return F.binary_cross_entropy_with_logits(x, t, w)
+
 
 def binary_focal_loss_with_logits(input, target, lam=2):
     weight = (target - F.sigmoid(input)).abs().pow(lam)
@@ -41,10 +48,10 @@ def binary_focal_loss_with_logits(input, target, lam=2):
     return ce
 
 
-def mse_focal_loss(pred, target, lam=2, reduce=True):
-    mse = F.mse_loss(pred, target, reduce=False)
-    loss = (pred - target).clamp(-1, 1).abs().pow(lam) * mse
-    return loss.mean() if reduce else loss
+# def mse_focal_loss(pred, target, lam=2, reduce=True):
+#     mse = F.mse_loss(pred, target, reduce=False)
+#     loss = (pred - target).clamp(-1, 1).abs().pow(lam) * mse
+#     return loss.mean() if reduce else loss
 
 
 def copy_state_dict(model):

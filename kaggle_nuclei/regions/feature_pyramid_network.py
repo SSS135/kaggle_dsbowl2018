@@ -14,16 +14,6 @@ import math
 from pretrainedmodels import resnext101_32x4d, resnext101_64x4d
 
 
-# def weights_init(m):
-#     # if isinstance(m, F._ConvNd) or isinstance(m, nn.Linear):
-#     #     torch.nn.init.orthogonal(m.weight.data, torch.nn.init.calculate_gain('relu'))
-#     #     if m.bias is not None:
-#     #         m.bias.data.fill_(0)
-#     if isinstance(m, _BatchNorm) or isinstance(m, _InstanceNorm):
-#         m.weight.data.normal_(1.0, 0.02)
-#         m.bias.data.fill_(0)
-
-
 class MaskHead(nn.Module):
     def __init__(self, num_filters, region_size, mask_size):
         super().__init__()
@@ -72,7 +62,7 @@ class MaskHead(nn.Module):
 
 
 class ScoreHead(nn.Module):
-    def __init__(self, num_filters, num_scores, init_foreground_confidence=0.01):
+    def __init__(self, num_filters, num_scores):
         super().__init__()
         self.score_layers = nn.Sequential(
             BatchChannels(num_filters),
@@ -95,7 +85,8 @@ class ScoreHead(nn.Module):
 
             nn.Conv2d(num_filters, num_scores, 1),
         )
-        self.score_layers[-1].bias.data.fill_(-math.log((1 - init_foreground_confidence) / init_foreground_confidence))
+        init_fg_conf = 0.01
+        self.score_layers[-1].bias.data.fill_(-math.log((1 - init_fg_conf) / init_fg_conf))
 
     def forward(self, input):
         score = self.score_layers(input.contiguous())
@@ -253,52 +244,6 @@ class BatchChannels(nn.Module):
         return x.view(-1, self.num_filters, *x.shape[2:])
 
 
-# class ResBottleneck(nn.Module):
-#     def __init__(self, c_in, c_reduction=1, num_groups=1, c_out=None):
-#         super().__init__()
-#         c_out = c_in if c_out is None else c_out
-#         c_red = c_in // c_reduction
-#         self.shortcut = nn.Conv2d(c_in, c_out, 1, bias=False) if c_in != c_out else (lambda x: x)
-#         self.layers = nn.Sequential(
-#             nn.Conv2d(c_in, c_red, 1, bias=False),
-#             nn.BatchNorm2d(c_red, affine=True),
-#             nn.ReLU(True),
-#
-#             nn.Conv2d(c_red, c_red, 3, 1, 1, groups=num_groups, bias=False),
-#             nn.BatchNorm2d(c_red, affine=True),
-#             nn.ReLU(True),
-#
-#             nn.Conv2d(c_red, c_out, 1, bias=False),
-#             nn.BatchNorm2d(c_out, affine=True),
-#         )
-#
-#     def forward(self, input):
-#         x = self.layers(input) + self.shortcut(input)
-#         return F.relu(x)
-
-
-# class ResBlock(nn.Module):
-#     def __init__(self, c_in, c_reduction=1, num_groups=1, c_out=None):
-#         super().__init__()
-#         c_out = c_in if c_out is None else c_out
-#         c_red = c_in // c_reduction
-#         self.shortcut = nn.Conv2d(c_in, c_out, 1, bias=False) if c_in != c_out else (lambda x: x)
-#         self.layers = nn.Sequential(
-#             nn.BatchNorm2d(c_in, affine=True),
-#             nn.ReLU(True),
-#             nn.Conv2d(c_in, c_red, 3, 1, 1, groups=num_groups, bias=False),
-#
-#             nn.BatchNorm2d(c_red, affine=True),
-#             nn.ReLU(True),
-#             nn.Conv2d(c_red, c_out, 1, bias=False),
-#         )
-#
-#     def forward(self, input):
-#         x = self.layers(input)
-#         x += self.shortcut(input)
-#         return x
-
-
 class FPN(nn.Module):
     mask_size = 28
     region_size = 7
@@ -326,31 +271,36 @@ class FPN(nn.Module):
         else:
             self.bidir = None
 
-        self.img_net = nn.Sequential(
-            BatchChannels(num_filters),
+        if out_image_channels != 0:
+            self.img_net = nn.Sequential(
+                BatchChannels(num_filters),
 
-            nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters, affine=True),
-            AdaptiveFeaturePooling(FPN.num_feature_groups),
+                nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(num_filters, affine=True),
+                AdaptiveFeaturePooling(FPN.num_feature_groups),
 
-            nn.Conv2d(num_filters, num_filters // 2, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters // 2, affine=True),
-            nn.ReLU(True),
+                nn.Conv2d(num_filters, num_filters // 2, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(num_filters // 2, affine=True),
+                nn.ReLU(True),
 
-            nn.Upsample(scale_factor=2),
+                nn.Upsample(scale_factor=2),
 
-            nn.Conv2d(num_filters // 2, num_filters // 4, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters // 4, affine=True),
-            nn.ReLU(True),
+                nn.Conv2d(num_filters // 2, num_filters // 4, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(num_filters // 4, affine=True),
+                nn.ReLU(True),
 
-            nn.Upsample(scale_factor=2),
+                nn.Upsample(scale_factor=2),
 
-            nn.Conv2d(num_filters // 4, num_filters // 8, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters // 8, affine=True),
-            nn.ReLU(True),
+                nn.Conv2d(num_filters // 4, num_filters // 8, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(num_filters // 8, affine=True),
+                nn.ReLU(True),
 
-            nn.Conv2d(num_filters // 8, out_image_channels, 1),
-        ) if out_image_channels != 0 else None
+                nn.Conv2d(num_filters // 8, out_image_channels, 1),
+            )
+            init_fg_conf = 0.01
+            self.img_net[-1].bias.data.fill_(-math.log((1 - init_fg_conf) / init_fg_conf))
+        else:
+            self.img_net = None
 
         self.mask_head = MaskHead(num_filters, self.region_size, self.mask_size)
         self.box_head = BoxHead(num_filters, self.region_size)
@@ -384,16 +334,6 @@ class FPN(nn.Module):
         return combined_levels
 
     def forward(self, x, output_unpadding=0):
-        # c1 = self.resnet.conv1(x)
-        # c1 = self.resnet.bn1(c1)
-        # c1 = self.resnet.relu(c1)
-        # c1 = self.resnet.maxpool(c1)
-        #
-        # c2 = self.resnet.layer1(c1)
-        # c3 = self.resnet.layer2(c2)
-        # c4 = self.resnet.layer3(c3)
-        # c5 = self.resnet.layer4(c4)
-
         c1 = self.resnet.features[0](x)
         c1 = self.resnet.features[1](c1)
         c1 = self.resnet.features[2](c1)
