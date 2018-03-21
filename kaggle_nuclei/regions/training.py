@@ -41,10 +41,10 @@ def binary_focal_loss_with_logits(input, target, lam=2):
     return ce
 
 
-# def mse_focal_loss(pred, target, lam=2, reduce=True):
-#     mse = F.mse_loss(pred, target, reduce=False)
-#     loss = (pred - target).clamp(-1, 1).abs().pow(lam) * mse
-#     return loss.mean() if reduce else loss
+def mse_focal_loss(pred, target, lam=2, reduce=True):
+    mse = F.mse_loss(pred, target, reduce=False)
+    loss = (pred - target).clamp(-1, 1).abs().pow(lam) * mse
+    return loss.mean() if reduce else loss
 
 
 def copy_state_dict(model):
@@ -74,12 +74,12 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
     # model_disc.apply(weights_init)
 
     # optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
-    optimizer_gen = GAdam(get_param_groups(model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='weight',
+    optimizer_gen = GAdam(get_param_groups(model_gen), lr=5e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
                           amsgrad=False, nesterov=0.5, weight_decay=1e-4)
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
-    # scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
+    scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
     # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
     best_state_dict = copy_state_dict(model_gen)
@@ -120,9 +120,10 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 if train_pairs is None:
                     continue
 
-                pred_masks, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops, layer_idx = train_pairs
+                pred_features, target_masks, pred_scores, target_scores, \
+                pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops, layer_idx = train_pairs
 
-                pred_masks = model_gen.predict_masks(pred_masks)
+                pred_masks = model_gen.predict_masks(pred_features)
 
                 bm_idx, bm_count = np.unique(layer_idx, return_counts=True)
                 batch_masks[bm_idx] += bm_count
@@ -133,7 +134,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
 
                 target_masks = Variable(target_masks)
                 target_scores = Variable(target_scores)
-                target_boxes = Variable(target_boxes)
+                target_boxes_raw = Variable(target_boxes_raw)
                 # img_crops = Variable(img_crops)
                 #
                 # # real
@@ -180,24 +181,23 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                 # # loss_gen += F.mse_loss(gen_d, real_d.detach())
 
                 img_mask_out, img_sdf_out, img_cont_out = model_out_img.split(1, 1)
-                # img_mask_out = F.sigmoid(img_mask_out)
                 img_mask_loss = binary_focal_loss_with_logits(img_mask_out, mask_train)
                 img_sdf_loss = binary_focal_loss_with_logits(img_sdf_out, sdf_train)
                 img_cont_loss = binary_focal_loss_with_logits(img_cont_out, cont_train)
 
                 mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks)
                 score_loss = binary_focal_loss_with_logits(pred_scores, target_scores)
-                box_loss = F.mse_loss(pred_boxes, target_boxes)
-                loss = mask_loss + box_loss + score_loss + (img_mask_loss + img_sdf_loss + img_cont_loss) / 3
+                box_loss = F.mse_loss(pred_boxes_raw, target_boxes_raw)
+                loss = mask_loss + box_loss + score_loss + 0.1 * (img_mask_loss + img_sdf_loss + img_cont_loss)
 
                 loss.backward()
                 optimizer_gen.step()
                 optimizer_gen.zero_grad()
 
-                # scheduler_gen.step()
+                scheduler_gen.step()
                 # scheduler_disc.step()
 
-                box_iou = aabb_iou(pred_boxes.data, target_boxes.data).mean()
+                box_iou = aabb_iou(pred_boxes, target_boxes).mean()
 
                 pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
                 target_score_np = (target_scores.data > 0.5).byte().cpu().numpy().reshape(-1)
@@ -234,7 +234,7 @@ def get_train_pairs(
         pos_samples=32, neg_to_pos_ratio=3):
     outputs = []
     for sample_idx in range(labels.shape[0]):
-        net_out_sample = [(m[sample_idx], s[sample_idx], (b[0][sample_idx], b[1])) for m, s, b in net_out]
+        net_out_sample = [(m[sample_idx], s[sample_idx], (b[0][sample_idx], b[1][sample_idx], b[2])) for m, s, b in net_out]
         o = get_train_pairs_single(
             model, labels[sample_idx, 0], sdf[sample_idx, 0], img[sample_idx], net_out_sample,
             model.mask_pixel_sizes, pos_sdf_threshold, neg_sdf_threshold,
@@ -248,9 +248,11 @@ def get_train_pairs(
 
     outputs = list(zip(*outputs))
     outputs, layer_idx = outputs[:-1], np.concatenate(outputs[-1])
-    pred_masks, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops = \
+    pred_features, target_masks, pred_scores, target_scores, \
+    pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops = \
         [torch.cat(o, 0) for o in outputs]
-    return pred_masks, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops, layer_idx
+    return pred_features, target_masks, pred_scores, target_scores, \
+           pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops, layer_idx
 
 
 def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
@@ -278,7 +280,7 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
                                pos_sdf_threshold, neg_sdf_threshold,
                                pos_iou_limit, neg_iou_limit,
                                pos_samples, neg_to_pos_ratio, box_padding=0.15):
-    out_boxes, anchor_boxes = out_boxes
+    out_boxes, raw_boxes, anchor_boxes = out_boxes
 
     # border and stride for converting between image space and conv-center space
     stride = model.mask_size // model.region_size
@@ -329,28 +331,52 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     target_scores[:pred_pos_scores.shape[0]] = 1
 
     # ([y, x, h, w], NPos)
-    pred_boxes = out_boxes.view(out_boxes.shape[0], -1)[:, pos_centers_fmap_idx]
-    target_boxes = target_boxes_fs.unsqueeze(1).repeat(1, anchor_boxes.shape[1], 1, 1) \
-                           .view(target_boxes_fs.shape[0], -1)[:, pos_centers_fmap_idx]
+    mask_boxes = out_boxes.data.view(out_boxes.shape[0], -1)[:, pos_centers_fmap_idx]
+    pred_boxes_raw = raw_boxes.view(raw_boxes.shape[0], -1)[:, pos_centers_fmap_idx_all]
+    pred_boxes = out_boxes.data.view(out_boxes.shape[0], -1)[:, pos_centers_fmap_idx_all]
+    target_boxes = target_boxes_fs.unsqueeze(1).repeat(1, anchor_boxes.shape[1], 1, 1)
+    target_boxes = target_boxes.view(target_boxes_fs.shape[0], -1)[:, pos_centers_fmap_idx_all]
+    anchor_boxes_selected = anchor_boxes.view(target_boxes_fs.shape[0], -1)[:, pos_centers_fmap_idx_all]
+    target_boxes_raw = to_raw_boxes(target_boxes, anchor_boxes_selected, anchor_boxes.shape[-2:])
 
+    mask_boxes = mask_boxes.t()
+    pred_boxes_raw, target_boxes_raw = pred_boxes_raw.t(), target_boxes_raw.t()
     pred_boxes, target_boxes = pred_boxes.t(), target_boxes.t()
-    pred_boxes_pad = pad_boxes(pred_boxes.data, box_padding)
 
-    pred_features = roi_align(out_features.unsqueeze(0), pred_boxes_pad, model.region_size)
+    mask_boxes = pad_boxes(mask_boxes, box_padding)
+
+    pred_features = roi_align(out_features.unsqueeze(0), mask_boxes, model.region_size)
     img_crops = roi_align(
         Variable(img.unsqueeze(0), volatile=True),
-        pred_boxes_pad,
+        mask_boxes,
         model.mask_size
     ).data
 
     pos_center_label_nums = labels[mask_centers_slice].unsqueeze(0).repeat(anchor_boxes.shape[1], 1, 1)
     pos_center_label_nums = pos_center_label_nums.take(pos_centers_fmap_idx)
 
-    target_masks = labels_to_mask_roi_align(labels, pred_boxes_pad, pos_center_label_nums, model.mask_size)
+    target_masks = labels_to_mask_roi_align(labels, mask_boxes, pos_center_label_nums, model.mask_size)
 
-    # print([x.shape for x in (pred_masks, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops)])
+    return pred_features, target_masks, pred_scores, target_scores, \
+           pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops
 
-    return pred_features, target_masks, pred_boxes, target_boxes, pred_scores, target_scores, img_crops
+
+def to_raw_boxes(boxes, anchor_boxes, fmap_shape):
+    assert boxes.shape == anchor_boxes.shape
+    assert boxes.dim() == 2
+    assert boxes.shape[0] == 4
+    assert len(fmap_shape) == 2
+
+    boxes, anchor_boxes = boxes.clone(), anchor_boxes.clone()
+
+    hwhw = boxes.new(2 * [*fmap_shape]).unsqueeze(1)
+    boxes /= hwhw
+    anchor_boxes /= hwhw
+
+    anchor_boxes[:2] += anchor_boxes[2:] / 2
+    boxes[:2].add_(boxes[2:] / 2).sub_(anchor_boxes[:2]).div_(anchor_boxes[2:])
+    boxes[2:].div_(anchor_boxes[2:]).log_()
+    return boxes
 
 
 def get_object_boxes(labels, downsampling=1):

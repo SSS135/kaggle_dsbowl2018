@@ -32,7 +32,7 @@ class MaskHead(nn.Module):
         self.region_size = region_size
         self.mask_size = mask_size
 
-        self.mask_layers = [
+        self.conv_mask_layers = [
             BatchChannels(num_filters),
 
             nn.BatchNorm2d(num_filters, affine=True),
@@ -40,6 +40,7 @@ class MaskHead(nn.Module):
 
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters, affine=True),
+
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
@@ -52,23 +53,22 @@ class MaskHead(nn.Module):
             prev_filters = cur_filters
             cur_filters //= 2
             cur_size *= 2
-            self.mask_layers.append(nn.Sequential(
+            self.conv_mask_layers.append(nn.Sequential(
                 nn.Upsample(scale_factor=2, mode='bilinear'),
                 nn.Conv2d(prev_filters, cur_filters, 3, 1, 1, bias=False),
                 nn.BatchNorm2d(cur_filters, affine=True),
                 nn.ReLU(True),
             ))
-        self.mask_layers.append(nn.Sequential(
+        self.conv_mask_layers.append(nn.Sequential(
             nn.Conv2d(cur_filters, 1, 1),
         ))
-        self.mask_layers = nn.Sequential(*self.mask_layers)
+        self.conv_mask_layers = nn.Sequential(*self.conv_mask_layers)
 
     def forward(self, input):
-        return input.contiguous() # self.preproc_layers(input.contiguous())
+        return input
 
     def predict_masks(self, x):
-        # assert x.shape == (x.shape[0], self.num_filters, self.region_size, self.region_size)
-        return self.mask_layers(x.contiguous())
+        return self.conv_mask_layers(x.contiguous())
 
 
 class ScoreHead(nn.Module):
@@ -82,6 +82,7 @@ class ScoreHead(nn.Module):
 
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters, affine=True),
+
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
@@ -118,6 +119,7 @@ class BoxHead(nn.Module):
 
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters, affine=True),
+
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
@@ -130,23 +132,21 @@ class BoxHead(nn.Module):
 
             nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1),
         )
-        self.layers[-1].weight.data.mul_(0.2)
         self.layers[-1].bias.data.fill_(0)
 
     def forward(self, input):
         ih, iw = input.shape[2:]
-        boxes = self.layers(input.contiguous())
+        raw_boxes = self.layers(input.contiguous())
         # boxes = Variable(boxes.data.fill_(0), requires_grad=True)
-        boxes = boxes.view(boxes.shape[0], len(self.pixel_boxes), 4, *boxes.shape[2:])
+        raw_boxes = raw_boxes.view(raw_boxes.shape[0], len(self.pixel_boxes), 4, *raw_boxes.shape[2:])
         anchor_sizes = Variable(self.pixel_boxes.view(1, len(self.pixel_boxes), 2, 1, 1))
         anchor_pos_y = torch.arange(ih).type_as(input.data).view(1, 1, -1, 1).add_(0.5)
         anchor_pos_x = torch.arange(iw).type_as(input.data).view(1, 1, 1, -1).add_(0.5)
         anchor_pos_y, anchor_pos_x = Variable(anchor_pos_y), Variable(anchor_pos_x)
-        sqrt2 = Variable(boxes.data.new([2]))
-        b_h = sqrt2.pow(boxes[:, :, 2]) * anchor_sizes[:, :, 0]
-        b_w = sqrt2.pow(boxes[:, :, 3]) * anchor_sizes[:, :, 1]
-        b_y = boxes[:, :, 0] * anchor_sizes[:, :, 0] + anchor_pos_y - b_h / 2
-        b_x = boxes[:, :, 1] * anchor_sizes[:, :, 1] + anchor_pos_x - b_w / 2
+        b_h = raw_boxes[:, :, 2].exp() * anchor_sizes[:, :, 0]
+        b_w = raw_boxes[:, :, 3].exp() * anchor_sizes[:, :, 1]
+        b_y = raw_boxes[:, :, 0] * anchor_sizes[:, :, 0] + anchor_pos_y - b_h / 2
+        b_x = raw_boxes[:, :, 1] * anchor_sizes[:, :, 1] + anchor_pos_x - b_w / 2
         # (B, yxhw, NBox, H, W)
         out_boxes = torch.stack([b_y / ih, b_x / iw, b_h / ih, b_w / iw], 1)
         anchor_part_shape = 1, len(self.pixel_boxes), anchor_pos_y.numel(), anchor_pos_x.numel()
@@ -160,19 +160,27 @@ class BoxHead(nn.Module):
             anchor_w.expand(*anchor_part_shape),
         ], 0)
         anchor_boxes.div_(self.pixel_boxes.new([ih, iw, ih, iw]).view(4, 1, 1, 1))
-        return out_boxes, anchor_boxes
+        return out_boxes, raw_boxes.transpose(1, 2).contiguous(), anchor_boxes
 
 
 class VerticalLayerSimple(nn.Module):
     def __init__(self, num_filters):
         super().__init__()
+        c_in = c_out = num_filters * 2
+        c_red = num_filters
+        num_groups = 32
         self.net = nn.Sequential(
-            nn.BatchNorm2d(num_filters * 2, affine=True),
+            nn.BatchNorm2d(c_in, affine=True),
             nn.ReLU(True),
-            nn.Conv2d(num_filters * 2, num_filters, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(num_filters, affine=True),
+            nn.Conv2d(c_in, c_red, 1, bias=False),
+
+            nn.BatchNorm2d(c_red, affine=True),
             nn.ReLU(True),
-            nn.Conv2d(num_filters, num_filters * 2, 3, 1, 1, bias=False),
+            nn.Conv2d(c_red, c_red, 3, 1, 1, groups=num_groups, bias=False),
+
+            nn.BatchNorm2d(c_red, affine=True),
+            nn.ReLU(True),
+            nn.Conv2d(c_red, c_out, 1, bias=False),
         )
 
     def forward(self, input_layers):
@@ -187,7 +195,7 @@ class VerticalLayerSimple(nn.Module):
                 raise ValueError((cx.shape, input.shape))
             input = torch.cat([input, cx], 1)
             cx_new, hx = self.net(input).chunk(2, 1)
-            cx += cx_new
+            cx = cx + cx_new
             output_layers.append(hx)
         return output_layers
 
@@ -245,28 +253,50 @@ class BatchChannels(nn.Module):
         return x.view(-1, self.num_filters, *x.shape[2:])
 
 
-class Bottleneck(nn.Module):
-    def __init__(self, num_filters, filter_reduction=2, num_groups=32):
-        super().__init__()
-        nf = num_filters
-        nrf = num_filters // filter_reduction
-        self.layers = nn.Sequential(
-            nn.BatchNorm2d(nf, affine=True),
-            nn.ReLU(True),
-            nn.Conv2d(nf, nrf, 1, bias=False),
+# class ResBottleneck(nn.Module):
+#     def __init__(self, c_in, c_reduction=1, num_groups=1, c_out=None):
+#         super().__init__()
+#         c_out = c_in if c_out is None else c_out
+#         c_red = c_in // c_reduction
+#         self.shortcut = nn.Conv2d(c_in, c_out, 1, bias=False) if c_in != c_out else (lambda x: x)
+#         self.layers = nn.Sequential(
+#             nn.Conv2d(c_in, c_red, 1, bias=False),
+#             nn.BatchNorm2d(c_red, affine=True),
+#             nn.ReLU(True),
+#
+#             nn.Conv2d(c_red, c_red, 3, 1, 1, groups=num_groups, bias=False),
+#             nn.BatchNorm2d(c_red, affine=True),
+#             nn.ReLU(True),
+#
+#             nn.Conv2d(c_red, c_out, 1, bias=False),
+#             nn.BatchNorm2d(c_out, affine=True),
+#         )
+#
+#     def forward(self, input):
+#         x = self.layers(input) + self.shortcut(input)
+#         return F.relu(x)
 
-            nn.BatchNorm2d(nrf, affine=True),
-            nn.ReLU(True),
-            nn.Conv2d(nrf, nrf, 3, 1, 1, groups=num_groups, bias=False),
 
-            nn.BatchNorm2d(nrf, affine=True),
-            nn.ReLU(True),
-            nn.Conv2d(nrf, nf, 1, bias=False),
-        )
-
-    def forward(self, input):
-        input += self.layers(input)
-        return input
+# class ResBlock(nn.Module):
+#     def __init__(self, c_in, c_reduction=1, num_groups=1, c_out=None):
+#         super().__init__()
+#         c_out = c_in if c_out is None else c_out
+#         c_red = c_in // c_reduction
+#         self.shortcut = nn.Conv2d(c_in, c_out, 1, bias=False) if c_in != c_out else (lambda x: x)
+#         self.layers = nn.Sequential(
+#             nn.BatchNorm2d(c_in, affine=True),
+#             nn.ReLU(True),
+#             nn.Conv2d(c_in, c_red, 3, 1, 1, groups=num_groups, bias=False),
+#
+#             nn.BatchNorm2d(c_red, affine=True),
+#             nn.ReLU(True),
+#             nn.Conv2d(c_red, c_out, 1, bias=False),
+#         )
+#
+#     def forward(self, input):
+#         x = self.layers(input)
+#         x += self.shortcut(input)
+#         return x
 
 
 class FPN(nn.Module):
@@ -298,9 +328,6 @@ class FPN(nn.Module):
 
         self.img_net = nn.Sequential(
             BatchChannels(num_filters),
-
-            nn.BatchNorm2d(num_filters, affine=True),
-            nn.ReLU(True),
 
             nn.Conv2d(num_filters, num_filters, 3, 1, 1, bias=False),
             nn.BatchNorm2d(num_filters, affine=True),

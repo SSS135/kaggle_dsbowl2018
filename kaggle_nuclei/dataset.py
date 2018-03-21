@@ -20,8 +20,8 @@ bad_ids = {
 
 train_pad = 32
 train_size = 512 - train_pad * 2
-resnet_norm_mean = [0.5, 0.5, 0.5]
-resnet_norm_std = [0.5, 0.5, 0.5]
+resnet_norm_mean = [0.485, 0.456, 0.406]
+resnet_norm_std = [0.229, 0.224, 0.225]
 
 
 class NucleiDataset(Dataset):
