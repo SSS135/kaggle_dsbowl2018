@@ -20,8 +20,8 @@ bad_ids = {
 
 train_pad = 32
 train_size = 512 - train_pad * 2
-resnet_norm_mean = [0.485, 0.456, 0.406]
-resnet_norm_std = [0.229, 0.224, 0.225]
+resnet_norm_mean = [124 / 255, 117 / 255, 104 / 255] # [0.485, 0.456, 0.406]
+resnet_norm_std = [1 / (.0167 * 255)] * 3 # [0.229, 0.224, 0.225]
 
 
 class NucleiDataset(Dataset):
@@ -37,11 +37,14 @@ class NucleiDataset(Dataset):
             self.datas = data
 
         crop_conf = dict(
-            size=train_size + train_pad * 2, padding=0, rotation={0, 90},
+            size=train_size + train_pad * 2, padding=0, rotation={(0, 360)},
             scale=(0.5, 2), horizontal_flip=True, vertical_flip=True)
 
         self.source_transform = tsf.Compose([
             RandomAffineCrop(pad_mode='median', **crop_conf),
+            tsf.ToPILImage(),
+            tsf.ColorJitter(0.3, 0.3, 0.3, 0.3),
+            tsf.ToTensor(),
             tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std),
         ])
         self.target_transform = tsf.Compose([

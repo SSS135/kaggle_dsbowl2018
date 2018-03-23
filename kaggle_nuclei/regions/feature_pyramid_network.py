@@ -76,7 +76,7 @@ class ScoreHead(nn.Module):
 
             nn.Conv2d(num_filters, num_scores, 1),
         )
-        init_fg_conf = 0.01
+        init_fg_conf = 0.1
         self.score_layers[-1].bias.data.fill_(-math.log((1 - init_fg_conf) / init_fg_conf))
 
     def forward(self, input):
@@ -332,7 +332,7 @@ class FPN(nn.Module):
             for other_level in levels:
                 osh = other_level.shape[2]
                 assert other_level.dim() == 4
-                assert other_level.shape[2] == other_level.shape[3]
+                assert other_level.shape[2] / other_level.shape[3] == base_level.shape[2] / base_level.shape[3]
                 if osh > bsh:
                     other_level = F.max_pool2d(other_level, osh // bsh)
                 elif osh < bsh:

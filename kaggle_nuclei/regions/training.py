@@ -85,7 +85,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
     # model_disc.apply(weights_init)
 
     # optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
-    optimizer_gen = GAdam(get_param_groups(model_gen), lr=5e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+    optimizer_gen = GAdam(get_param_groups(model_gen), lr=3e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
                           amsgrad=False, nesterov=0.5, weight_decay=1e-4)
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
@@ -231,7 +231,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
                     MPS=np.round(batch_masks / (batch_idx + 1) / img.shape[0], 1), refresh=False)
 
             if model_save_path is not None:
-                torch.save(model_save_path, model_gen, pickle_module=dill)
+                torch.save(model_gen, model_save_path, pickle_module=dill)
             # score = t_iou_sum
             # if score > best_score:
             #     best_score = score
