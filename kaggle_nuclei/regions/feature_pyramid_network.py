@@ -11,7 +11,7 @@ from torchvision.models.resnet import resnet50, model_urls
 import itertools
 import math
 from pretrainedmodels import resnext101_32x4d, resnext101_64x4d, dpn92
-from optfn.batch_renormalization import BatchReNorm2d
+from optfn.batch_renormalization_relu import BatchReNorm2dReLU
 from optfn.shuffle_conv import ShuffleConv2d
 
 
