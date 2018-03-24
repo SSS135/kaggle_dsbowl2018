@@ -26,12 +26,10 @@ class MaskHead(nn.Module):
         self.conv_mask_layers = [
             BatchChannels(num_filters),
             ResBlock(num_filters),
-            nn.BatchNorm2d(num_filters, affine=True),
-
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
             ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
-            nn.BatchNorm2d(num_filters, affine=True),
+            nn.InstanceNorm2d(num_filters, affine=True),
             nn.ReLU(True),
         ]
         cur_size = region_size
@@ -43,7 +41,7 @@ class MaskHead(nn.Module):
             self.conv_mask_layers.append(nn.Sequential(
                 nn.Upsample(scale_factor=2, mode='bilinear'),
                 ShuffleConv2d(prev_filters, cur_filters, 3, 1, 1, bias=False, groups=4),
-                nn.BatchNorm2d(cur_filters, affine=True),
+                nn.InstanceNorm2d(cur_filters, affine=True),
                 nn.ReLU(True),
             ))
         self.conv_mask_layers.append(nn.Sequential(
@@ -67,11 +65,11 @@ class ScoreHead(nn.Module):
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
             ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
-            nn.BatchNorm2d(num_filters, affine=True),
+            nn.InstanceNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
             ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
-            nn.BatchNorm2d(num_filters, affine=True),
+            nn.InstanceNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
             nn.Conv2d(num_filters, num_scores, 1),
@@ -99,11 +97,11 @@ class BoxHead(nn.Module):
             AdaptiveFeaturePooling(FPN.num_feature_groups),
 
             ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
-            nn.BatchNorm2d(num_filters, affine=True),
+            nn.InstanceNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
             ShuffleConv2d(num_filters, num_filters, 3, 1, 1, bias=False, groups=4),
-            nn.BatchNorm2d(num_filters, affine=True),
+            nn.InstanceNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
             nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1),
@@ -144,11 +142,11 @@ class VerticalLayerSimple(nn.Module):
         super().__init__()
         c_in = c_out = num_filters * 2
         self.net = nn.Sequential(
-            nn.BatchNorm2d(c_in, affine=True),
+            nn.InstanceNorm2d(c_in, affine=True),
             nn.ReLU(True),
             ShuffleConv2d(c_in, c_in, 3, 1, 1, bias=False, groups=4),
 
-            nn.BatchNorm2d(c_in, affine=True),
+            nn.InstanceNorm2d(c_in, affine=True),
             nn.ReLU(True),
             ShuffleConv2d(c_in, c_out, 3, 1, 1, bias=False, groups=4),
         )
@@ -229,11 +227,11 @@ class ResBlock(nn.Module):
         c_out = c_in if c_out is None else c_out
         self.shortcut = nn.Conv2d(c_in, c_out, 1, bias=False) if c_in != c_out else (lambda x: x)
         self.layers = nn.Sequential(
-            nn.BatchNorm2d(c_in, affine=True),
+            nn.InstanceNorm2d(c_in, affine=True),
             nn.ReLU(True),
             ShuffleConv2d(c_in, c_in, 3, 1, 1, bias=False, groups=4),
 
-            nn.BatchNorm2d(c_in, affine=True),
+            nn.InstanceNorm2d(c_in, affine=True),
             nn.ReLU(True),
             ShuffleConv2d(c_in, c_out, 3, 1, 1, bias=False, groups=4),
         )
@@ -287,19 +285,19 @@ class FPN(nn.Module):
                 AdaptiveFeaturePooling(FPN.num_feature_groups),
 
                 ShuffleConv2d(num_filters, num_filters // 2, 3, 1, 1, bias=False, groups=4),
-                nn.BatchNorm2d(num_filters // 2, affine=True),
+                nn.InstanceNorm2d(num_filters // 2, affine=True),
                 nn.ReLU(True),
 
                 nn.Upsample(scale_factor=2),
 
                 ShuffleConv2d(num_filters // 2, num_filters // 4, 3, 1, 1, bias=False, groups=4),
-                nn.BatchNorm2d(num_filters // 4, affine=True),
+                nn.InstanceNorm2d(num_filters // 4, affine=True),
                 nn.ReLU(True),
 
                 nn.Upsample(scale_factor=2),
 
                 ShuffleConv2d(num_filters // 4, num_filters // 8, 3, 1, 1, bias=False, groups=4),
-                nn.BatchNorm2d(num_filters // 8, affine=True),
+                nn.InstanceNorm2d(num_filters // 8, affine=True),
                 nn.ReLU(True),
 
                 nn.Conv2d(num_filters // 8, out_image_channels, 1),

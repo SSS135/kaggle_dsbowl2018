@@ -5,7 +5,9 @@ import numpy as np
 import torch
 import torchvision.transforms as tsf
 from torch.utils.data import Dataset
-from .settings import train_pad, train_size, resnet_norm_std, resnet_norm_mean
+from tqdm import tqdm
+
+from .settings import train_pad, train_size, resnet_norm_std, resnet_norm_mean, box_padding
 from .transforms import RandomAffineCrop
 
 # bad_ids = {
@@ -24,11 +26,8 @@ class NucleiDataset(Dataset):
         self.normalize_scale_by_obj_area = normalize_scale_by_obj_area
         self.normalize_image_sample_freq = normalize_image_sample_freq
         self.data = data
-        self.target_obj_area = 58 * 58
+        self.target_obj_area = (58 * (1 + 2 * box_padding)) ** 2
         self.base_scale_range = 0.5, 2
-
-        if self.has_mask and 'median_mask_area' not in data[0]:
-            add_median_mask_area(data)
 
         self.index_map = np.arange(len(data))
         if normalize_image_sample_freq:
@@ -73,7 +72,7 @@ class NucleiDataset(Dataset):
             target_area_sq = self.target_obj_area ** 0.5
             scale_mul = target_area_sq / med_area_sq
             scale = scale_mul * self.base_scale_range[0], scale_mul * self.base_scale_range[1]
-            self.source_random_affine_crop.scale = self.target_random_affine_crop = scale
+            self.source_random_affine_crop.scale = self.target_random_affine_crop.scale = scale
 
         img = data['img'].float() / 255
         rstate = random.getstate()
@@ -101,11 +100,3 @@ class NucleiDataset(Dataset):
 
     def __len__(self):
         return len(self.index_map)
-
-
-def add_median_mask_area(train_data):
-    for sample in train_data:
-        boxes = sample['info_mask']
-        unique_boxes = np.unique(boxes.reshape(boxes.shape[0], -1), axis=1)
-        assert unique_boxes.ndim == 2 and unique_boxes.shape[0] == 4 and unique_boxes.shape[1] >= 1
-        sample['median_mask_area'] = np.median(unique_boxes[:, 2] * unique_boxes[:, 3])

@@ -81,7 +81,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=1, pin_memory=True)
 
     model_gen = FPN(3).cuda() if saved_model is None else saved_model.cuda()
-    batch_to_instance_norm(model_gen)
+    # batch_to_instance_norm(model_gen)
     model_gen.freeze_pretrained_layers(False)
     # model_disc = GanD(4).cuda()
 
@@ -296,7 +296,7 @@ def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
 def generate_samples_for_layer(model, out_features, out_scores, out_boxes, labels, sdf, obj_boxes, img,
                                pos_sdf_threshold, neg_sdf_threshold,
                                pos_iou_limit, neg_iou_limit,
-                               pos_samples, neg_to_pos_ratio, box_padding=0.15):
+                               pos_samples, neg_to_pos_ratio, box_padding=box_padding):
     out_boxes, raw_boxes, anchor_boxes = out_boxes
 
     # border and stride for converting between image space and conv-center space

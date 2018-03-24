@@ -42,10 +42,15 @@ def process_raw(root, has_mask=True, save_human_readable_masks=False):
 
             sdf_compressed = (sdf * 127.5 + 127.5).clip(0, 255).astype(np.uint8)
             mask_compressed = mask if num_objects >= 255 else mask.astype(np.uint8)
+            # H x W
             item['mask_compressed'] = torch.from_numpy(mask_compressed)
+            # H x W
             item['sdf_compressed'] = torch.from_numpy(sdf_compressed)
-            item['info_mask'] = torch.from_numpy(obj_boxes.transpose((2, 0, 1)))
+            # 4 x H x W
+            item['obj_boxes'] = torch.from_numpy(obj_boxes.transpose((2, 0, 1)))
+            item['median_mask_area'] = calc_median_mask_area(item['obj_boxes'])
         item['name'] = str(file).split('/')[-1]
+        # 3 x H x W
         item['img'] = torch.from_numpy(np.transpose(img, (2, 0, 1)))
         datas.append(item)
     return datas
@@ -121,3 +126,11 @@ def distance_field(labels, clip=(-1, 1), downscale=2):
     maxdist = scipy.misc.imresize(maxdist, padded_shape, mode='F')
     maxdist = maxdist[:-h_pad - 1, :-w_pad - 1]
     return maxdist
+
+
+def calc_median_mask_area(boxes):
+    boxes = boxes.numpy()
+    assert boxes.shape[0] == 4
+    unique_boxes = np.unique(boxes.reshape(boxes.shape[0], -1), axis=1)
+    assert unique_boxes.ndim == 2 and unique_boxes.shape[0] == 4 and unique_boxes.shape[1] >= 1
+    return np.median(unique_boxes[2] * unique_boxes[3])
