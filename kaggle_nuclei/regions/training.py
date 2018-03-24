@@ -13,7 +13,7 @@ from torch.autograd import Variable
 from tqdm import tqdm
 from torch import nn
 
-from ..dataset import NucleiDataset, train_pad, train_size
+from ..dataset import NucleiDataset
 from .feature_pyramid_network import FPN
 from ..iou import threshold_iou, iou
 from ..losses import dice_loss, soft_dice_loss, clipped_mse_loss
@@ -26,9 +26,9 @@ from collections import OrderedDict
 from tensorboardX import SummaryWriter
 from ..roi_align import roi_align, pad_boxes
 import dill
-
-
-box_padding = 0.2
+from optfn.batch_renormalization import BatchReNorm2d
+from optfn.near_instance_norm import NearInstanceNorm2d
+from ..settings import box_padding, train_pad, train_size
 
 
 # def binary_cross_entropy_with_logits(x, z, reduce=True):
@@ -60,16 +60,20 @@ def mse_focal_loss(pred, target, focal_threshold, lam=2):
 #     return copy.deepcopy(OrderedDict((k, v.cpu()) for k, v in model.state_dict().items()))
 
 
-def batch_to_instance_norm(model, inst_norm_class=nn.InstanceNorm2d):
+def batch_to_instance_norm(model):
     for module in model.modules():
-        for name, child in module.named_children():
-            if isinstance(child, nn.BatchNorm2d):
-                norm = inst_norm_class(child.num_features, child.eps, child.momentum, child.affine)
-                norm.weight = child.weight
-                norm.bias = child.bias
-                norm.running_mean = child.running_mean
-                norm.running_var = child.running_var
-                setattr(module, name, norm)
+        for name, old_norm in module.named_children():
+            if isinstance(old_norm, nn.BatchNorm2d):
+                new_norm = nn.InstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
+                # new_norm = NearInstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
+                new_norm.weight = old_norm.weight
+                new_norm.bias = old_norm.bias
+                new_norm.running_mean = old_norm.running_mean
+                if hasattr(new_norm, 'running_var'):
+                    new_norm.running_var = old_norm.running_var
+                elif hasattr(new_norm, 'running_std'):
+                    new_norm.running_std = old_norm.running_var.sqrt_()
+                setattr(module, name, new_norm)
 
 
 def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None, model_save_path=None):

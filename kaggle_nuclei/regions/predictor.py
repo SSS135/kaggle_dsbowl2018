@@ -8,11 +8,10 @@ import torch.nn.functional as F
 from scipy import ndimage
 from torch.autograd import Variable
 from tqdm import tqdm
-from ..dataset import resnet_norm_mean, resnet_norm_std, train_pad
+from ..settings import resnet_norm_mean, resnet_norm_std, train_pad, box_padding
 import itertools
 import torchvision.transforms as tsf
 from ..roi_align import roi_align, pad_boxes
-from .training import box_padding
 
 img_size_div = 32
 border_pad = 64
