@@ -26,7 +26,7 @@ class NucleiDataset(Dataset):
         self.normalize_scale_by_obj_area = normalize_scale_by_obj_area
         self.normalize_image_sample_freq = normalize_image_sample_freq
         self.data = data
-        self.target_obj_area = (58 * (1 + 2 * box_padding)) ** 2
+        self.target_obj_area = (58 * (1 + box_padding)) ** 2
         self.base_scale_range = 0.5, 2
 
         self.index_map = np.arange(len(data))

@@ -12,7 +12,9 @@ import itertools
 import math
 from pretrainedmodels import resnext101_32x4d, resnext101_64x4d, dpn92
 from optfn.batch_renormalization_relu import BatchReNorm2dReLU
+from optfn.near_instance_norm import NearInstanceNorm2d
 from optfn.shuffle_conv import ShuffleConv2d
+from optfn.se_module import SELayer
 
 
 class MaskHead(nn.Module):
@@ -149,6 +151,7 @@ class VerticalLayerSimple(nn.Module):
             nn.InstanceNorm2d(c_in, affine=True),
             nn.ReLU(True),
             ShuffleConv2d(c_in, c_out, 3, 1, 1, bias=False, groups=4),
+            SELayer(c_out),
         )
 
     def forward(self, input_layers):
@@ -234,6 +237,7 @@ class ResBlock(nn.Module):
             nn.InstanceNorm2d(c_in, affine=True),
             nn.ReLU(True),
             ShuffleConv2d(c_in, c_out, 3, 1, 1, bias=False, groups=4),
+            SELayer(c_out),
         )
 
     def forward(self, input):
@@ -332,7 +336,7 @@ class FPN(nn.Module):
                 assert other_level.dim() == 4
                 assert other_level.shape[2] / other_level.shape[3] == base_level.shape[2] / base_level.shape[3]
                 if osh > bsh:
-                    other_level = F.max_pool2d(other_level, osh // bsh)
+                    other_level = F.avg_pool2d(other_level, osh // bsh)
                 elif osh < bsh:
                     other_level = F.upsample(other_level, scale_factor=bsh // osh, mode='bilinear')
                 resized_levels.append(other_level)

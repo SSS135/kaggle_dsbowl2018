@@ -94,7 +94,7 @@ def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_pre
     # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
     #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
-    scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader), 2)
+    scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader) // 4, 2)
     # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
     # best_state_dict = copy_state_dict(model_gen)
