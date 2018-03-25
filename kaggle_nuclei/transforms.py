@@ -121,18 +121,19 @@ class RandomAffineCrop:
             order=0,
             offset=offset,
             output_shape=out_shape,
+            prefilter=False,
         )
         return dst, transform
 
     @staticmethod
-    def padded_crop(x, rect, pad_mode='constant'):
+    def padded_crop(img, rect, pad_mode='constant'):
         """ rect == (y, x, h, w) """
         rect = (rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3])
         allowed_rect = (
-            min(max(rect[0], 0), x.shape[0]),
-            min(max(rect[1], 0), x.shape[1]),
-            min(max(rect[2], 0), x.shape[0]),
-            min(max(rect[3], 0), x.shape[1]),
+            min(max(rect[0], 0), img.shape[0]),
+            min(max(rect[1], 0), img.shape[1]),
+            min(max(rect[2], 0), img.shape[0]),
+            min(max(rect[3], 0), img.shape[1]),
         )
         padding = (
             allowed_rect[0] - rect[0],
@@ -141,11 +142,27 @@ class RandomAffineCrop:
             rect[3] - allowed_rect[3],
         )
 
+        complex_pad = pad_mode == 'median' or pad_mode == 'minimum'
+        if complex_pad:
+            fill_value = np.median(img, axis=(0, 1)) if pad_mode == 'median' else img.min(axis=(0, 1))
+            constant_values = np.inf
+            pad_mode = 'constant'
+        else:
+            constant_values = 0
+            fill_value = None
+
         atop, aleft, abot, aright = allowed_rect
-        x = x[atop: abot, aleft: aright]
+        img = img[atop: abot, aleft: aright]
         ptop, pleft, pbot, pright = padding
-        x = np.pad(x, ((ptop, pbot), (pleft, pright), (0, 0)), pad_mode)
-        return x
+        img = np.pad(img, ((ptop, pbot), (pleft, pright), (0, 0)), pad_mode, constant_values=constant_values)
+
+        if complex_pad:
+            img[:ptop] = fill_value
+            img[img.shape[0] - pbot:] = fill_value
+            img[:, :pleft] = fill_value
+            img[:, img.shape[1] - pright:] = fill_value
+
+        return img
 
     @staticmethod
     def rotate_vec_2d(y, x, radians):

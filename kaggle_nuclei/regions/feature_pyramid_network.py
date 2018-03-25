@@ -47,8 +47,8 @@ class MaskHead(nn.Module):
         ))
         self.conv_mask_layers = nn.Sequential(*self.conv_mask_layers)
 
-    def forward(self, input):
-        return input
+    def forward(self, input, unpadding):
+        return input[..., unpadding: -unpadding, unpadding: -unpadding].contiguous()
 
     def predict_masks(self, x):
         return self.conv_mask_layers(x.contiguous())
@@ -75,8 +75,8 @@ class ScoreHead(nn.Module):
         init_fg_conf = 0.1
         self.score_layers[-1].bias.data.fill_(-math.log((1 - init_fg_conf) / init_fg_conf))
 
-    def forward(self, input):
-        score = self.score_layers(input.contiguous())
+    def forward(self, input, unpadding):
+        score = self.score_layers(input)[..., unpadding: -unpadding, unpadding: -unpadding].contiguous()
         return score
 
 
@@ -105,10 +105,11 @@ class BoxHead(nn.Module):
             nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1),
         )
         self.layers[-1].bias.data.fill_(0)
+        self.layers[-1].weight.data.mul_(0.2)
 
-    def forward(self, input):
-        ih, iw = input.shape[2:]
-        raw_boxes = self.layers(input.contiguous())
+    def forward(self, input, unpadding):
+        raw_boxes = self.layers(input)[..., unpadding: -unpadding, unpadding: -unpadding].contiguous()
+        ih, iw = raw_boxes.shape[2:]
         # boxes = Variable(boxes.data.fill_(0), requires_grad=True)
         raw_boxes = raw_boxes.view(raw_boxes.shape[0], len(self.pixel_boxes), 4, *raw_boxes.shape[2:])
         anchor_sizes = Variable(self.pixel_boxes.view(1, len(self.pixel_boxes), 2, 1, 1))
@@ -217,7 +218,7 @@ class BatchChannels(nn.Module):
         self.num_filters = num_filters
 
     def forward(self, x):
-        return x.view(-1, self.num_filters, *x.shape[2:])
+        return x.contiguous().view(-1, self.num_filters, *x.shape[2:])
 
 
 class ResBlock(nn.Module):
@@ -251,8 +252,8 @@ class FPN(nn.Module):
         super().__init__()
         self.enable_bidir = enable_bidir
 
-        self.mask_pixel_sizes = (1, 2, 4, 8)
-        self.mask_strides = (4, 8, 16, 32)
+        self.mask_pixel_sizes = (1, 2, 4)
+        self.mask_strides = (4, 8, 16)
         # rn = resnet50(True)
         # self.resnet = nn.ModuleList([rn.conv1, rn.bn1, rn.relu, rn.maxpool, rn.layer1, rn.layer2, rn.layer3, rn.layer4])
         # self.resnet = nn.ModuleList(list(resnext101_32x4d().features)[:8])
@@ -366,28 +367,19 @@ class FPN(nn.Module):
         if self.enable_bidir:
             p2, p3, p4, p5 = self.bidir((p2, p3, p4, p5))
 
-        p2, p3, p4, p5 = self.combine_levels((p2, p3, p4, p5), (0, 1, 2, 3))
+        p2, p3, p4 = self.combine_levels((p2, p3, p4, p5), (0, 1, 2))
 
-        img = self.img_net(p2)[:, :, output_unpadding:-output_unpadding, output_unpadding:-output_unpadding] \
+        img = self.img_net(p2)[..., output_unpadding:-output_unpadding, output_unpadding:-output_unpadding] \
             if self.img_net is not None else None
 
-        m5 = self.mask_head(p5), self.score_head(p5), self.box_head(p5)
-        m4 = self.mask_head(p4), self.score_head(p4), self.box_head(p4)
-        m3 = self.mask_head(p3), self.score_head(p3), self.box_head(p3)
-        m2 = self.mask_head(p2), self.score_head(p2), self.box_head(p2)
+        def mask_score_box(fmap, unpadding):
+            return self.mask_head(fmap, unpadding), self.score_head(fmap, unpadding), self.box_head(fmap, unpadding)
 
-        def unpad_layer(layer, upad):
-            data = layer[0], layer[1], *layer[2]
-            data = [v[..., upad: -upad, upad: -upad].contiguous() for v in data]
-            return data[0], data[1], data[2:]
+        m4 = mask_score_box(p4, output_unpadding // 16)
+        m3 = mask_score_box(p3, output_unpadding // 8)
+        m2 = mask_score_box(p2, output_unpadding // 4)
 
-        if output_unpadding != 0:
-            assert output_unpadding % 32 == 0
-            ou = output_unpadding
-            m5, m4, m3, m2 = [unpad_layer(m, upad) for m, upad in
-                              ((m5, ou // 32), (m4, ou // 16), (m3, ou // 8), (m2, ou // 4))]
-
-        return (m2, m3, m4, m5), img
+        return (m2, m3, m4), img
 
     def predict_masks(self, x):
         return self.mask_head.predict_masks(x)

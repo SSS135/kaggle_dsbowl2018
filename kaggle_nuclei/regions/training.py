@@ -12,6 +12,7 @@ from sklearn.metrics import precision_recall_fscore_support
 from torch import nn
 from torch.autograd import Variable
 from tqdm import tqdm
+import torch.backends.cudnn
 
 from .feature_pyramid_network import FPN
 from ..dataset import NucleiDataset
@@ -38,11 +39,11 @@ def binary_focal_loss_with_logits(x, t, gamma=2, alpha=0.25):
 #     return ce
 
 
-def mse_focal_loss(pred, target, focal_threshold, lam=2):
-    mse = F.mse_loss(pred, target, reduce=False)
-    w = (pred - target).clamp(-focal_threshold, focal_threshold).div(focal_threshold).abs().pow(lam).detach()
-    loss = w * mse
-    return loss.mean()
+# def mse_focal_loss(pred, target, focal_threshold, lam=2):
+#     mse = F.mse_loss(pred, target, reduce=False)
+#     w = (pred - target).clamp(-focal_threshold, focal_threshold).div(focal_threshold).abs().pow(lam).detach()
+#     loss = w * mse
+#     return loss.mean()
 
 
 # def copy_state_dict(model):
@@ -66,6 +67,20 @@ def batch_to_instance_norm(model):
 
 
 class Trainer:
+    def __init__(self):
+        self.dataset = None
+        self.dataloader = None
+        self.model_gen = None
+        self.optimizer_gen = None
+        self.scheduler_gen = None
+        self.score_fscore_sum = None
+        self.t_iou_sum = None
+        self.f_iou_sum = None
+        self.box_iou_sum = None
+        self.optim_iter = None
+        self.batch_masks = None
+        self.pbar = None
+
     def train(self, train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None, model_save_path=None):
         self.dataset = NucleiDataset(train_data)
         self.dataloader = torch.utils.data.DataLoader(self.dataset, shuffle=True, batch_size=1, pin_memory=True)
@@ -80,7 +95,7 @@ class Trainer:
 
         # optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
         self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=5e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
-                              amsgrad=False, nesterov=0.5, weight_decay=1e-4)
+                                   amsgrad=False, nesterov=0.5, weight_decay=1e-4)
         # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
         #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
@@ -260,9 +275,11 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     # target_boxes_fs[0] -= target_boxes_fs[2] * box_padding
     # target_boxes_fs[1] -= target_boxes_fs[3] * box_padding
     # target_boxes_fs[2:] *= 1 + 2 * box_padding
-    target_boxes_fs = target_boxes_fs.float() / target_boxes_fs.new(2 * [labels.shape[0], labels.shape[1]]).view(-1, 1, 1)
+    target_boxes_fs = target_boxes_fs.float() / target_boxes_fs.new(2 * [*labels.shape[:2]]).view(-1, 1, 1)
 
-    assert target_boxes_fs.shape[-1] == anchor_boxes.shape[-1], (target_boxes_fs.shape, anchor_boxes.shape, out_boxes.shape, out_features.shape, labels.shape, sdf.shape, img.shape)
+    assert target_boxes_fs.shape[-1] == anchor_boxes.shape[-1], \
+        (target_boxes_fs.shape, anchor_boxes.shape, out_boxes.shape, out_features.shape,
+         labels.shape, sdf.shape, img.shape)
 
     anchor_iou = aabb_iou(
         target_boxes_fs.unsqueeze(1).expand_as(anchor_boxes).contiguous().view(anchor_boxes.shape[0], -1).t(),
@@ -345,6 +362,7 @@ def to_raw_boxes(boxes, anchor_boxes, fmap_shape):
 def get_object_boxes(labels, downsampling=1):
     # [size, size]
     assert labels.dim() == 2
+    assert labels.shape[0] == labels.shape[1]
 
     src_labels_shape = labels.shape
     if downsampling != 1:
