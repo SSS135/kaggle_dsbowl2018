@@ -255,8 +255,8 @@ class FPN(nn.Module):
         super().__init__()
         self.enable_bidir = enable_bidir
 
-        self.mask_pixel_sizes = (1, 2, 4)
-        self.mask_strides = (4, 8, 16)
+        self.mask_pixel_sizes = (1, 2, 4, 8)
+        self.mask_strides = (4, 8, 16, 32)
         # rn = resnet50(True)
         # self.resnet = nn.ModuleList([rn.conv1, rn.bn1, rn.relu, rn.maxpool, rn.layer1, rn.layer2, rn.layer3, rn.layer4])
         # self.resnet = nn.ModuleList(list(resnext101_32x4d().features)[:8])
@@ -370,22 +370,28 @@ class FPN(nn.Module):
         if self.enable_bidir:
             p2, p3, p4, p5 = self.bidir((p2, p3, p4, p5))
 
-        p2, p3, p4 = self.combine_levels((p2, p3, p4, p5), (0, 1, 2))
+        p2, p3, p4, p5 = self.combine_levels((p2, p3, p4, p5), (0, 1, 2, 3))
 
         img = self.img_net(p2)[:, :, output_unpadding:-output_unpadding, output_unpadding:-output_unpadding] \
             if self.img_net is not None else None
 
-        if output_unpadding != 0:
-            assert output_unpadding % 32 == 0
-            ou = output_unpadding
-            p5, p4, p3, p2 = [p[:, :, div:-div, div:-div] for (p, div) in
-                              ((p5, ou // 32), (p4, ou // 16), (p3, ou // 8), (p2, ou // 4))]
-
+        m5 = self.mask_head(p5), self.score_head(p5), self.box_head(p5)
         m4 = self.mask_head(p4), self.score_head(p4), self.box_head(p4)
         m3 = self.mask_head(p3), self.score_head(p3), self.box_head(p3)
         m2 = self.mask_head(p2), self.score_head(p2), self.box_head(p2)
 
-        return (m2, m3, m4), img
+        def unpad_layer(layer, upad):
+            data = layer[0], layer[1], *layer[2]
+            data = [v[..., upad: -upad, upad: -upad].contiguous() for v in data]
+            return data[0], data[1], data[2:]
+
+        if output_unpadding != 0:
+            assert output_unpadding % 32 == 0
+            ou = output_unpadding
+            m5, m4, m3, m2 = [unpad_layer(m, upad) for m, upad in
+                              ((m5, ou // 32), (m4, ou // 16), (m3, ou // 8), (m2, ou // 4))]
+
+        return (m2, m3, m4, m5), img
 
     def predict_masks(self, x):
         return self.mask_head.predict_masks(x)

@@ -13,16 +13,13 @@ import itertools
 import torchvision.transforms as tsf
 from ..roi_align import roi_align, pad_boxes
 
+
 img_size_div = 32
 
 
-def extract_proposals_chunked(model, img, scale=1, score_threshold=0.8, pad_offset=(0, 0)):
+def extract_proposals_chunked(model, img, score_threshold):
     img = img.numpy().transpose(1, 2, 0)
-    s_shape = (np.array(img.shape[:2]) * scale / img_size_div).round().astype(int) * img_size_div
-    if np.max(s_shape) > 1024:
-        # print(f'ignoring scale {scale}, size {tuple(s_shape)}, '
-        #       f'source size {tuple(img.shape)} for {data["name"][:16]}')
-        return None
+    s_shape = (np.array(img.shape[:2]) / img_size_div).round().astype(int) * img_size_div
 
     x = scipy.misc.imresize(img, s_shape).astype(np.float32) / 255
     padding = (total_pad + pad_offset[0], total_pad - pad_offset[0]), \
@@ -53,7 +50,7 @@ def extract_proposals_chunked(model, img, scale=1, score_threshold=0.8, pad_offs
     return preds
 
 
-def extract_proposals_from_chunk(model, img, score_threshold=0.5):
+def extract_proposals_from_chunk(model, img, score_threshold):
     x = torch.from_numpy(img).cuda()
     x = tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std)(x)
     x = x.unsqueeze(0)

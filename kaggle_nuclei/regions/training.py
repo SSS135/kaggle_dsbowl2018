@@ -76,172 +76,129 @@ def batch_to_instance_norm(model):
                 setattr(module, name, new_norm)
 
 
-def train(train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None, model_save_path=None):
-    dataset = NucleiDataset(train_data)
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=1, pin_memory=True)
+class Trainer:
+    def train(self, train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None, model_save_path=None):
+        self.dataset = NucleiDataset(train_data)
+        self.dataloader = torch.utils.data.DataLoader(self.dataset, shuffle=True, batch_size=1, pin_memory=True)
 
-    model_gen = FPN(3).cuda() if saved_model is None else saved_model.cuda()
-    # batch_to_instance_norm(model_gen)
-    model_gen.freeze_pretrained_layers(False)
-    # model_disc = GanD(4).cuda()
+        self.model_gen = FPN(3).cuda() if saved_model is None else saved_model.cuda()
+        # batch_to_instance_norm(model_gen)
+        self.model_gen.freeze_pretrained_layers(False)
+        # model_disc = GanD(4).cuda()
 
-    # model_gen.apply(weights_init)
-    # model_disc.apply(weights_init)
+        # model_gen.apply(weights_init)
+        # model_disc.apply(weights_init)
 
-    # optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
-    optimizer_gen = GAdam(get_param_groups(model_gen), lr=3e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
-                          amsgrad=False, nesterov=0.5, weight_decay=1e-4)
-    # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
-    #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
+        # optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
+        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=5e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+                              amsgrad=False, nesterov=0.5, weight_decay=1e-4)
+        # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+        #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
-    scheduler_gen = CosineAnnealingRestartParam(optimizer_gen, len(dataloader) // 4, 2)
-    # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
+        self.scheduler_gen = CosineAnnealingRestartParam(self.optimizer_gen, len(self.dataloader) // 4, 2)
+        # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
 
-    # best_state_dict = copy_state_dict(model_gen)
-    # best_score = -math.inf
+        # best_state_dict = copy_state_dict(model_gen)
+        # best_score = -math.inf
 
-    # one = Variable(torch.cuda.FloatTensor([0.95]))
-    # zero = Variable(torch.cuda.FloatTensor([0.05]))
+        # one = Variable(torch.cuda.FloatTensor([0.95]))
+        # zero = Variable(torch.cuda.FloatTensor([0.05]))
 
-    # summary = SummaryWriter()
-    # summary.add_text('hparams', f'epochs {epochs}; pretrain {pretrain_epochs}; '
-    #                             f'batch size {dataloader.batch_size}; img size {train_size}; img pad {train_pad}')
+        # summary = SummaryWriter()
+        # summary.add_text('hparams', f'epochs {epochs}; pretrain {pretrain_epochs}; '
+        #                             f'batch size {dataloader.batch_size}; img size {train_size}; img pad {train_pad}')
 
-    sys.stdout.flush()
+        sys.stdout.flush()
 
-    for epoch in range(epochs):
-        with tqdm(dataloader) as pbar:
-            model_gen.freeze_pretrained_layers(epoch < pretrain_epochs)
-            score_fscore_sum, t_iou_sum, f_iou_sum, box_iou_sum = 0, 0, 0, 0
-            optim_iter = 0
+        for epoch in range(epochs):
+            with tqdm(self.dataloader) as self.pbar:
+                self.model_gen.freeze_pretrained_layers(epoch < pretrain_epochs)
+                self.score_fscore_sum, self.t_iou_sum, self.f_iou_sum, self.box_iou_sum = 0, 0, 0, 0
+                self.optim_iter = 0
 
-            batch_masks = np.zeros(len(model_gen.mask_pixel_sizes))
+                self.batch_masks = np.zeros(len(self.model_gen.mask_pixel_sizes))
 
-            for batch_idx, data in enumerate(pbar):
-                optimizer_gen.zero_grad()
-                scheduler_gen.step()
-                # scheduler_disc.step()
+                for batch_idx, data in enumerate(self.pbar):
+                    self.optim_step(data, batch_idx, epoch)
 
-                img, labels, sdf = [x.cuda() for x in data]
-                x_train = Variable(img)
-                sdf_train = Variable(sdf * 0.5 + 0.5)
-                mask_train = Variable((labels > 0).float())
+                if model_save_path is not None:
+                    torch.save(self.model_gen, model_save_path, pickle_module=dill)
 
-                cont_train = 1 - sdf ** 2
-                cont_train = (cont_train.clamp(0.9, 1) - 0.9) * 10
-                cont_train = Variable(cont_train)
+        return self.model_gen
 
-                model_out_layers, model_out_img = model_gen(x_train, train_pad)
-                train_pairs = get_train_pairs(
-                    model_gen, labels, sdf, img[:, :, train_pad:-train_pad, train_pad:-train_pad], model_out_layers)
+    def optim_step(self, data, batch_idx, epoch):
+        self.optimizer_gen.zero_grad()
+        self.scheduler_gen.step()
+        # scheduler_disc.step()
 
-                if train_pairs is None:
-                    optimizer_gen.zero_grad()
-                    continue
+        img, labels, sdf = [x.cuda() for x in data]
+        x_train = Variable(img)
+        sdf_train = Variable(sdf * 0.5 + 0.5)
+        mask_train = Variable((labels > 0).float())
 
-                pred_features, target_masks, pred_scores, target_scores, \
-                pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops, layer_idx = train_pairs
+        cont_train = 1 - sdf ** 2
+        cont_train = (cont_train.clamp(0.9, 1) - 0.9) * 10
+        cont_train = Variable(cont_train)
 
-                pred_masks = model_gen.predict_masks(pred_features)
+        model_out_layers, model_out_img = self.model_gen(x_train, train_pad)
+        train_pairs = get_train_pairs(
+            self.model_gen, labels, sdf, img[:, :, train_pad:-train_pad, train_pad:-train_pad], model_out_layers)
 
-                bm_idx, bm_count = np.unique(layer_idx, return_counts=True)
-                batch_masks[bm_idx] += bm_count
+        if train_pairs is None:
+            self.optimizer_gen.zero_grad()
+            return
 
-                if return_predictions_at_epoch is not None and return_predictions_at_epoch == epoch:
-                    return pred_masks.data.cpu(), target_masks.cpu(), img_crops.cpu(), \
-                           x_train.data.cpu(), labels.cpu(), model_out_img.data.cpu(), model_gen
+        pred_features, target_masks, pred_scores, target_scores, \
+        pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops, layer_idx = train_pairs
 
-                target_masks = Variable(target_masks)
-                target_scores = Variable(target_scores)
-                target_boxes_raw = Variable(target_boxes_raw)
-                # img_crops = Variable(img_crops)
-                #
-                # # real
-                #
-                # # for p in model_disc.parameters():
-                # #     p.data.clamp_(-0.01, 0.01)
-                #
-                # optimizer_disc.zero_grad()
-                #
-                # read_disc_in = torch.cat([img_crops, target_masks], 1)
-                # real_d, real_features = model_disc(read_disc_in)
-                # loss_real = 0
-                # # loss_real += -real_d.mean()
-                # loss_real += F.binary_cross_entropy_with_logits(real_d, one.expand_as(real_d))
-                # # loss_real += 0.5 * (1 - real_d.clamp(max=1)).pow_(2).mean()
-                # # loss_real += 0.5 * (1 - real_d).pow_(2).mean()
-                # loss_real.backward()
-                #
-                # # fake
-                #
-                # fake_disc_in = torch.cat([img_crops, F.sigmoid(pred_masks)], 1)
-                # fake_d, fake_features = model_disc(fake_disc_in.detach())
-                # loss_fake = 0
-                # # loss_fake += fake_d.mean()
-                # loss_fake += F.binary_cross_entropy_with_logits(fake_d, zero.expand_as(fake_d))
-                # # loss_fake += 0.5 * (-1 - fake_d.clamp(min=-1)).pow_(2).mean()
-                # # loss_fake += 0.5 * (0 - fake_d).pow_(2).mean()
-                # loss_fake.backward()
-                #
-                # # gradient_penalty = calc_gradient_penalty(model_disc, read_disc_in.data, fake_disc_in.data)
-                # # gradient_penalty.backward()
-                #
-                # optimizer_disc.step()
-                #
-                # # gen
-                #
-                # gen_d, fake_features = model_disc(fake_disc_in)
-                # loss_gen = 0
-                # # loss_gen += -gen_d.mean()
-                # # loss_gen += binary_focal_loss_with_logits(gen_d, one.expand_as(gen_d))
-                # # loss_gen += 0.5 * (1 - gen_d.div(3).clamp(min=-1)).pow_(2).mean()
-                # # loss_gen += 0.5 * (1 - gen_d).pow_(2).mean()
-                # loss_gen += F.mse_loss(fake_features, real_features.detach())
-                # # loss_gen += F.mse_loss(gen_d, real_d.detach())
+        pred_masks = self.model_gen.predict_masks(pred_features)
 
-                img_mask_out, img_sdf_out, img_cont_out = model_out_img.split(1, 1)
-                img_mask_loss = binary_focal_loss_with_logits(img_mask_out, mask_train)
-                img_sdf_loss = binary_focal_loss_with_logits(img_sdf_out, sdf_train)
-                img_cont_loss = binary_focal_loss_with_logits(img_cont_out, cont_train)
+        bm_idx, bm_count = np.unique(layer_idx, return_counts=True)
+        self.batch_masks[bm_idx] += bm_count
 
-                mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks)
-                score_loss = binary_focal_loss_with_logits(pred_scores, target_scores)
-                box_loss = F.mse_loss(pred_boxes_raw, target_boxes_raw)
-                loss = mask_loss + box_loss + score_loss + 0.1 * (img_mask_loss + img_sdf_loss + img_cont_loss)
+        # if return_predictions_at_epoch is not None and return_predictions_at_epoch == epoch:
+        #     return pred_masks.data.cpu(), target_masks.cpu(), img_crops.cpu(), \
+        #            x_train.data.cpu(), labels.cpu(), model_out_img.data.cpu(), model_gen
 
-                loss.backward()
-                optimizer_gen.step()
-                optimizer_gen.zero_grad()
+        target_masks = Variable(target_masks)
+        target_scores = Variable(target_scores)
+        target_boxes_raw = Variable(target_boxes_raw)
 
-                box_iou = aabb_iou(pred_boxes, target_boxes).mean()
+        img_mask_out, img_sdf_out, img_cont_out = model_out_img.split(1, 1)
+        img_mask_loss = binary_focal_loss_with_logits(img_mask_out, mask_train)
+        img_sdf_loss = binary_focal_loss_with_logits(img_sdf_out, sdf_train)
+        img_cont_loss = binary_focal_loss_with_logits(img_cont_out, cont_train)
 
-                pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
-                target_score_np = (target_scores.data > 0.5).byte().cpu().numpy().reshape(-1)
+        mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks)
+        score_loss = binary_focal_loss_with_logits(pred_scores, target_scores)
+        box_loss = F.mse_loss(pred_boxes_raw, target_boxes_raw)
+        loss = mask_loss + box_loss + score_loss + 0.1 * (img_mask_loss + img_sdf_loss + img_cont_loss)
 
-                _, _, score_fscore, _ = precision_recall_fscore_support(
-                    pred_score_np, target_score_np, average='binary', warn_for=[])
+        loss.backward()
+        self.optimizer_gen.step()
+        self.optimizer_gen.zero_grad()
 
-                f_iou = iou(pred_masks.data > 0, target_masks.data > 0.5)
-                t_iou = threshold_iou(f_iou)
+        box_iou = aabb_iou(pred_boxes, target_boxes).mean()
 
-                optim_iter += 1
-                score_fscore_sum += score_fscore
-                f_iou_sum += f_iou.mean()
-                t_iou_sum += t_iou.mean()
-                box_iou_sum += box_iou
-                pbar.set_postfix(
-                    _E=epoch, SF=score_fscore_sum / optim_iter, BIoU=box_iou_sum / optim_iter,
-                    MIoU=f_iou_sum / optim_iter, MIoU_T=t_iou_sum / optim_iter,
-                    MPS=np.round(batch_masks / (batch_idx + 1) / img.shape[0], 1), refresh=False)
+        pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
+        target_score_np = (target_scores.data > 0.5).byte().cpu().numpy().reshape(-1)
 
-            if model_save_path is not None:
-                torch.save(model_gen, model_save_path, pickle_module=dill)
-            # score = t_iou_sum
-            # if score > best_score:
-            #     best_score = score
-            #     best_state_dict = copy_state_dict(model_gen)
-    # model_gen.load_state_dict(best_state_dict)
-    return model_gen
+        _, _, score_fscore, _ = precision_recall_fscore_support(
+            pred_score_np, target_score_np, average='binary', warn_for=[])
+
+        f_iou = iou(pred_masks.data > 0, target_masks.data > 0.5)
+        t_iou = threshold_iou(f_iou)
+
+        self.optim_iter += 1
+        self.score_fscore_sum += score_fscore
+        self.f_iou_sum += f_iou.mean()
+        self.t_iou_sum += t_iou.mean()
+        self.box_iou_sum += box_iou
+        oi = self.optim_iter
+        self.pbar.set_postfix(
+            _E=epoch, SF=self.score_fscore_sum / oi, BIoU=self.box_iou_sum / oi,
+            MIoU=self.f_iou_sum / oi, MIoU_T=self.t_iou_sum / oi,
+            MPS=np.round(self.batch_masks / (batch_idx + 1) / img.shape[0], 1), refresh=False)
 
 
 def get_train_pairs(
