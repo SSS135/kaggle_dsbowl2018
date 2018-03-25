@@ -1,34 +1,23 @@
-import copy
-import math
 import sys
 
+import dill
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.data
 from optfn.cosine_annealing import CosineAnnealingRestartParam
 from optfn.gadam import GAdam
 from optfn.param_groups_getter import get_param_groups
-from sklearn.metrics import matthews_corrcoef, precision_recall_fscore_support
+from sklearn.metrics import precision_recall_fscore_support
+from torch import nn
 from torch.autograd import Variable
 from tqdm import tqdm
-from torch import nn
 
-from ..dataset import NucleiDataset
 from .feature_pyramid_network import FPN
+from ..dataset import NucleiDataset
 from ..iou import threshold_iou, iou
-from ..losses import dice_loss, soft_dice_loss, clipped_mse_loss
-import numpy as np
-import numpy.random as rng
-from torch.nn.modules.conv import _ConvNd
-from torch.nn.modules.batchnorm import _BatchNorm
-import time
-from collections import OrderedDict
-from tensorboardX import SummaryWriter
 from ..roi_align import roi_align, pad_boxes
-import dill
-from optfn.batch_renormalization import BatchReNorm2d
-from optfn.near_instance_norm import NearInstanceNorm2d
-from ..settings import box_padding, train_pad, train_size
+from ..settings import box_padding, train_pad
 
 
 # def binary_cross_entropy_with_logits(x, z, reduce=True):

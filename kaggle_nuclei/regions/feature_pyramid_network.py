@@ -1,20 +1,16 @@
 # https://github.com/kuangliu/pytorch-fpn/blob/master/fpn.py
 
-import torch
-import torch.nn.functional as F
-from torch import nn
-from torch.autograd import Variable
-from torch.nn.modules.batchnorm import _BatchNorm
-from torch.nn.modules.instancenorm import _InstanceNorm
-from torch.utils import model_zoo
-from torchvision.models.resnet import resnet50, model_urls
 import itertools
 import math
-from pretrainedmodels import resnext101_32x4d, resnext101_64x4d, dpn92
-from optfn.batch_renormalization_relu import BatchReNorm2dReLU
-from optfn.near_instance_norm import NearInstanceNorm2d
-from optfn.shuffle_conv import ShuffleConv2d
+
+import torch
+import torch.nn.functional as F
 from optfn.se_module import SELayer
+from optfn.shuffle_conv import ShuffleConv2d
+from pretrainedmodels import dpn92
+from torch import nn
+from torch.autograd import Variable
+from torch.nn.modules.instancenorm import _InstanceNorm
 
 
 class MaskHead(nn.Module):

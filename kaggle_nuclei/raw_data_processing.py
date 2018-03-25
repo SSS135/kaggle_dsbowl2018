@@ -1,13 +1,12 @@
 from pathlib import Path
 
 import numpy as np
+import scipy.misc
+import skfmm
 import torch
 from scipy import ndimage
-import scipy.misc
 from skimage import io
 from tqdm import tqdm
-from itertools import count
-import skfmm
 
 
 def process_raw(root, has_mask=True, save_human_readable_masks=False):

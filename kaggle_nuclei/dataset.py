@@ -5,10 +5,10 @@ import numpy as np
 import torch
 import torchvision.transforms as tsf
 from torch.utils.data import Dataset
-from tqdm import tqdm
 
 from .settings import train_pad, train_size, resnet_norm_std, resnet_norm_mean, box_padding
 from .transforms import RandomAffineCrop
+
 
 # bad_ids = {
 #     '19f0653c33982a416feed56e5d1ce6849fd83314fd19dfa1c5b23c6b66e9868a', # very many mistakes
