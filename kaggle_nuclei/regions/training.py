@@ -2,13 +2,18 @@ import sys
 
 import dill
 import numpy as np
+import time
 import torch
 import torch.nn.functional as F
 import torch.utils.data
 from optfn.cosine_annealing import CosineAnnealingRestartParam
 from optfn.gadam import GAdam
 from optfn.param_groups_getter import get_param_groups
+from optfn.near_instance_norm import NearInstanceNorm2d
+from optfn.batch_renormalization import BatchReNorm2d
+from optfn.learned_norm import LearnedNorm2d
 from sklearn.metrics import precision_recall_fscore_support
+from tensorboardX import SummaryWriter
 from torch import nn
 from torch.autograd import Variable
 from tqdm import tqdm
@@ -18,7 +23,7 @@ from .feature_pyramid_network import FPN
 from ..dataset import NucleiDataset
 from ..iou import threshold_iou, iou
 from ..roi_align import roi_align, pad_boxes
-from ..settings import box_padding, train_pad
+from ..settings import box_padding, train_pad, resnet_norm_mean, resnet_norm_std
 
 
 # def binary_cross_entropy_with_logits(x, z, reduce=True):
@@ -50,19 +55,23 @@ def binary_focal_loss_with_logits(x, t, gamma=2, alpha=0.25):
 #     return copy.deepcopy(OrderedDict((k, v.cpu()) for k, v in model.state_dict().items()))
 
 
-def batch_to_instance_norm(model):
+def adjust_norm_scheme(model):
     for module in model.modules():
         for name, old_norm in module.named_children():
-            if isinstance(old_norm, nn.BatchNorm2d):
-                new_norm = nn.InstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
+            if isinstance(old_norm, nn.InstanceNorm2d):
+                new_norm = LearnedNorm2d(old_norm.num_features)
+                # new_norm = nn.InstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
                 # new_norm = NearInstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
-                new_norm.weight = old_norm.weight
-                new_norm.bias = old_norm.bias
-                new_norm.running_mean = old_norm.running_mean
-                if hasattr(new_norm, 'running_var'):
-                    new_norm.running_var = old_norm.running_var
-                elif hasattr(new_norm, 'running_std'):
-                    new_norm.running_std = old_norm.running_var.sqrt_()
+                # if hasattr(new_norm, 'weight'):
+                #     new_norm.weight = old_norm.weight
+                # if hasattr(new_norm, 'bias'):
+                #     new_norm.bias = old_norm.bias
+                # if hasattr(new_norm, 'running_mean'):
+                #     new_norm.running_mean = old_norm.running_mean
+                # if hasattr(new_norm, 'running_var'):
+                #     new_norm.running_var = old_norm.running_var
+                # elif hasattr(new_norm, 'running_std'):
+                #     new_norm.running_std = old_norm.running_var.sqrt_()
                 setattr(module, name, new_norm)
 
 
@@ -73,64 +82,44 @@ class Trainer:
         self.model_gen = None
         self.optimizer_gen = None
         self.scheduler_gen = None
-        self.score_fscore_sum = None
-        self.t_iou_sum = None
-        self.f_iou_sum = None
-        self.box_iou_sum = None
-        self.optim_iter = None
-        self.batch_masks = None
+        self.prev_batch_time = None
         self.pbar = None
+        self.summary: SummaryWriter = None
+        self.optim_iter = 0
 
-    def train(self, train_data, epochs=15, pretrain_epochs=7, saved_model=None, return_predictions_at_epoch=None, model_save_path=None):
+    def train(self, train_data, epochs=15, pretrain_epochs=7, saved_model=None, model_save_path=None):
         self.dataset = NucleiDataset(train_data)
         self.dataloader = torch.utils.data.DataLoader(self.dataset, shuffle=True, batch_size=1, pin_memory=True)
 
-        self.model_gen = FPN(3).cuda() if saved_model is None else saved_model.cuda()
-        # batch_to_instance_norm(model_gen)
+        self.model_gen = FPN(3) if saved_model is None else saved_model
+        adjust_norm_scheme(self.model_gen)
+        self.model_gen = self.model_gen.cuda()
         self.model_gen.freeze_pretrained_layers(False)
-        # model_disc = GanD(4).cuda()
 
-        # model_gen.apply(weights_init)
-        # model_disc.apply(weights_init)
-
-        # optimizer_gen = torch.optim.SGD(get_param_groups(model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
-        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=5e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
                                    amsgrad=False, nesterov=0.5, weight_decay=1e-4)
-        # optimizer_disc = GAdam(get_param_groups(model_disc), lr=1e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
-        #                       amsgrad=False, nesterov=0.5, weight_decay=1e-4, norm_weight_decay=False)
 
-        self.scheduler_gen = CosineAnnealingRestartParam(self.optimizer_gen, len(self.dataloader) // 4, 2)
-        # scheduler_disc = CosineAnnealingRestartLR(optimizer_disc, len(dataloader), 2)
-
-        # best_state_dict = copy_state_dict(model_gen)
-        # best_score = -math.inf
-
-        # one = Variable(torch.cuda.FloatTensor([0.95]))
-        # zero = Variable(torch.cuda.FloatTensor([0.05]))
-
-        # summary = SummaryWriter()
-        # summary.add_text('hparams', f'epochs {epochs}; pretrain {pretrain_epochs}; '
-        #                             f'batch size {dataloader.batch_size}; img size {train_size}; img pad {train_pad}')
+        self.scheduler_gen = CosineAnnealingRestartParam(self.optimizer_gen, len(self.dataloader), 2)
 
         sys.stdout.flush()
 
-        for epoch in range(epochs):
-            with tqdm(self.dataloader) as self.pbar:
-                self.model_gen.freeze_pretrained_layers(epoch < pretrain_epochs)
-                self.score_fscore_sum, self.t_iou_sum, self.f_iou_sum, self.box_iou_sum = 0, 0, 0, 0
-                self.optim_iter = 0
+        self.prev_batch_time = time.time()
 
-                self.batch_masks = np.zeros(len(self.model_gen.mask_pixel_sizes))
+        with SummaryWriter() as self.summary:
+            self.summary.add_text('hparams', f'epochs {epochs}; pretrain {pretrain_epochs}')
+            for epoch in range(epochs):
+                with tqdm(self.dataloader) as self.pbar:
+                    self.model_gen.freeze_pretrained_layers(epoch < pretrain_epochs)
 
-                for batch_idx, data in enumerate(self.pbar):
-                    self.optim_step(data, batch_idx, epoch)
+                    for data in self.pbar:
+                        self.optim_step(data)
 
-                if model_save_path is not None:
-                    torch.save(self.model_gen, model_save_path, pickle_module=dill)
+                    if model_save_path is not None:
+                        torch.save(self.model_gen, model_save_path, pickle_module=dill)
 
         return self.model_gen
 
-    def optim_step(self, data, batch_idx, epoch):
+    def optim_step(self, data):
         self.optimizer_gen.zero_grad()
         self.scheduler_gen.step()
         # scheduler_disc.step()
@@ -147,6 +136,26 @@ class Trainer:
         model_out_layers, model_out_img = self.model_gen(x_train, train_pad)
         train_pairs = get_train_pairs(
             self.model_gen, labels, sdf, img[:, :, train_pad:-train_pad, train_pad:-train_pad], model_out_layers)
+        img_mask_out, img_sdf_out, img_cont_out = model_out_img.split(1, 1)
+
+        optim_iter = self.optim_iter + 1
+
+        batch_time = time.time() - self.prev_batch_time
+        self.prev_batch_time = time.time()
+        if optim_iter >= 100 and optim_iter % 10 == 0:
+            self.summary.add_scalar('Batch Time', batch_time, optim_iter)
+
+        if optim_iter >= 100 and optim_iter % 100 == 0:
+            resnet_std = data[0].new(resnet_norm_std).view(-1, 1, 1)
+            resnet_mean = data[0].new(resnet_norm_mean).view(-1, 1, 1)
+            img_unnorm = data[0].mul(resnet_std).add_(resnet_mean)
+            good_looking_mask = data[1].float().mul(1 / (data[1].max() + 10)).clamp_(0, 1)
+            self.summary.add_image('Train Image', img_unnorm, optim_iter)
+            self.summary.add_image('Train Mask', good_looking_mask, optim_iter)
+            self.summary.add_image('Train SDF', sdf_train.data, optim_iter)
+            self.summary.add_image('Predicted Mask', torch.sigmoid(img_mask_out.data), optim_iter)
+            self.summary.add_image('Predicted SDF', torch.sigmoid(img_sdf_out.data), optim_iter)
+            self.summary.add_image('Predicted Contour', torch.sigmoid(img_cont_out.data), optim_iter)
 
         if train_pairs is None:
             self.optimizer_gen.zero_grad()
@@ -158,7 +167,8 @@ class Trainer:
         pred_masks = self.model_gen.predict_masks(pred_features)
 
         bm_idx, bm_count = np.unique(layer_idx, return_counts=True)
-        self.batch_masks[bm_idx] += bm_count
+        batch_masks = np.zeros(len(self.model_gen.mask_pixel_sizes))
+        batch_masks[bm_idx] += bm_count
 
         # if return_predictions_at_epoch is not None and return_predictions_at_epoch == epoch:
         #     return pred_masks.data.cpu(), target_masks.cpu(), img_crops.cpu(), \
@@ -168,13 +178,12 @@ class Trainer:
         target_scores = Variable(target_scores)
         target_boxes_raw = Variable(target_boxes_raw)
 
-        img_mask_out, img_sdf_out, img_cont_out = model_out_img.split(1, 1)
-        img_mask_loss = binary_focal_loss_with_logits(img_mask_out, mask_train)
-        img_sdf_loss = binary_focal_loss_with_logits(img_sdf_out, sdf_train)
-        img_cont_loss = binary_focal_loss_with_logits(img_cont_out, cont_train)
+        img_mask_loss = binary_focal_loss_with_logits(img_mask_out, mask_train.clamp(0.05, 0.95))
+        img_sdf_loss = binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.05, 0.95))
+        img_cont_loss = binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.05, 0.95))
 
-        mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks)
-        score_loss = binary_focal_loss_with_logits(pred_scores, target_scores)
+        mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks.clamp(0.05, 0.95))
+        score_loss = binary_focal_loss_with_logits(pred_scores, target_scores.clamp(0.05, 0.95))
         box_loss = F.mse_loss(pred_boxes_raw, target_boxes_raw)
         loss = mask_loss + box_loss + score_loss + 0.1 * (img_mask_loss + img_sdf_loss + img_cont_loss)
 
@@ -182,27 +191,31 @@ class Trainer:
         self.optimizer_gen.step()
         self.optimizer_gen.zero_grad()
 
-        box_iou = aabb_iou(pred_boxes, target_boxes).mean()
+        box_iou = aabb_iou(pred_boxes, target_boxes)
 
         pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
         target_score_np = (target_scores.data > 0.5).byte().cpu().numpy().reshape(-1)
 
-        _, _, score_fscore, _ = precision_recall_fscore_support(
+        score_prec, score_rec, score_fscore, _ = precision_recall_fscore_support(
             pred_score_np, target_score_np, average='binary', warn_for=[])
 
         f_iou = iou(pred_masks.data > 0, target_masks.data > 0.5)
         t_iou = threshold_iou(f_iou)
 
+        if optim_iter >= 100 and optim_iter % 10 == 0:
+            self.summary.add_scalar('Score FScore', score_fscore, optim_iter)
+            self.summary.add_scalar('Score Precision', score_prec, optim_iter)
+            self.summary.add_scalar('Score Recall', score_rec, optim_iter)
+            self.summary.add_scalar('Mask IoU Full', f_iou.mean(), optim_iter)
+            self.summary.add_scalar('Mask IoU Threshold', t_iou.mean(), optim_iter)
+            self.summary.add_scalar('Box IoU', box_iou.mean(), optim_iter)
+            self.summary.add_scalar('Learning Rate', self.optimizer_gen.param_groups[0]['lr'], optim_iter)
+            self.summary.add_histogram('Masks Per Level', batch_masks, optim_iter)
+            self.summary.add_histogram('Full Mask IoU Hist', f_iou, optim_iter)
+            self.summary.add_histogram('Threshold Mask IoU Hist', t_iou, optim_iter)
+            self.summary.add_histogram('Box IoU Hist', box_iou, optim_iter)
+
         self.optim_iter += 1
-        self.score_fscore_sum += score_fscore
-        self.f_iou_sum += f_iou.mean()
-        self.t_iou_sum += t_iou.mean()
-        self.box_iou_sum += box_iou
-        oi = self.optim_iter
-        self.pbar.set_postfix(
-            _E=epoch, SF=self.score_fscore_sum / oi, BIoU=self.box_iou_sum / oi,
-            MIoU=self.f_iou_sum / oi, MIoU_T=self.t_iou_sum / oi,
-            MPS=np.round(self.batch_masks / (batch_idx + 1) / img.shape[0], 1), refresh=False)
 
 
 def get_train_pairs(

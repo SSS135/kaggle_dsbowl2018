@@ -35,7 +35,7 @@ class Pad:
 
 class RandomAffineCrop:
     def __init__(self, size, padding=0, rotation=(0,), scale=(1, 1),
-                 horizontal_flip=False, vertical_flip=False, pad_mode='constant',
+                 horizontal_flip=False, vertical_flip=False, pad_mode='constant', affine_order=1,
                  callback=None):
         self.size = size
         self.padding = padding
@@ -44,6 +44,7 @@ class RandomAffineCrop:
         self.pad_mode = pad_mode
         self.horizontal_flip = horizontal_flip
         self.vertical_flip = vertical_flip
+        self.affine_order = affine_order
         self.callback = callback # (result, pixel_transform(y, x)) -> None or array
 
     def __call__(self, input):
@@ -74,7 +75,7 @@ class RandomAffineCrop:
         crop_rect = (crop_y, crop_x, rot_padded_scaled_size, rot_padded_scaled_size)
         x = self.padded_crop(x, crop_rect, self.pad_mode)
         x, transf = self.affine_transform(x, scale, rotation, hflip, vflip,
-                                          (rot_padded_size, rot_padded_size, x.shape[2]))
+                                          (rot_padded_size, rot_padded_size, x.shape[2]), self.affine_order)
         x = x[rot_pad: rot_pad + self.size, rot_pad: rot_pad + self.size]
 
         if self.callback is not None:
@@ -92,7 +93,7 @@ class RandomAffineCrop:
         return x
 
     @staticmethod
-    def affine_transform(x, scale, rot, hflip, vflip, out_shape):
+    def affine_transform(x, scale, rot, hflip, vflip, out_shape, order):
         c_in = 0.5 * np.array(x.shape)
         c_out = 0.5 * np.array(out_shape)
 
@@ -118,7 +119,7 @@ class RandomAffineCrop:
         dst = scipy.ndimage.interpolation.affine_transform(
             x,
             transform,
-            order=0,
+            order=order,
             offset=offset,
             output_shape=out_shape,
             prefilter=False,
