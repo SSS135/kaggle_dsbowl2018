@@ -17,13 +17,14 @@ from tensorboardX import SummaryWriter
 from torch import nn
 from torch.autograd import Variable
 from tqdm import tqdm
-import torch.backends.cudnn
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from .feature_pyramid_network import FPN
 from ..dataset import NucleiDataset
 from ..iou import threshold_iou, iou
 from ..roi_align import roi_align, pad_boxes
 from ..settings import box_padding, train_pad, resnet_norm_mean, resnet_norm_std
+from ..losses import soft_dice_loss
 
 
 # def binary_cross_entropy_with_logits(x, z, reduce=True):
@@ -53,6 +54,14 @@ def binary_focal_loss_with_logits(x, t, gamma=2, alpha=0.25):
 
 # def copy_state_dict(model):
 #     return copy.deepcopy(OrderedDict((k, v.cpu()) for k, v in model.state_dict().items()))
+
+
+def get_reg_loss(model):
+    losses = []
+    for module in model.modules():
+        if hasattr(module, 'reg_loss') and module.reg_loss is not None:
+            losses.append(module.reg_loss)
+    return torch.cat(losses).sum()
 
 
 def adjust_norm_scheme(model):
@@ -96,7 +105,7 @@ class Trainer:
         self.model_gen = self.model_gen.cuda()
         self.model_gen.freeze_pretrained_layers(False)
 
-        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='tensor',
+        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='output',
                                    amsgrad=False, nesterov=0.5, weight_decay=1e-4)
 
         self.scheduler_gen = CosineAnnealingRestartParam(self.optimizer_gen, len(self.dataloader), 2)
@@ -129,13 +138,12 @@ class Trainer:
         sdf_train = Variable(sdf * 0.5 + 0.5)
         mask_train = Variable((labels > 0).float())
 
-        cont_train = 1 - sdf ** 2
-        cont_train = (cont_train.clamp(0.9, 1) - 0.9) * 10
+        cont_train = 1 - (sdf.clamp(0.0, 0.25) * 8 - 1) ** 2
         cont_train = Variable(cont_train)
 
-        model_out_layers, model_out_img = self.model_gen(x_train, train_pad)
-        train_pairs = get_train_pairs(
-            self.model_gen, labels, sdf, img[:, :, train_pad:-train_pad, train_pad:-train_pad], model_out_layers)
+        model_out_layers, model_out_img = self.model_gen(x_train)
+        unpad_slice = (Ellipsis, slice(train_pad, -train_pad), slice(train_pad, -train_pad))
+        train_pairs = get_train_pairs(self.model_gen, labels, sdf, img, model_out_layers)
         img_mask_out, img_sdf_out, img_cont_out = model_out_img.split(1, 1)
 
         optim_iter = self.optim_iter + 1
@@ -149,13 +157,16 @@ class Trainer:
             resnet_std = data[0].new(resnet_norm_std).view(-1, 1, 1)
             resnet_mean = data[0].new(resnet_norm_mean).view(-1, 1, 1)
             img_unnorm = data[0].mul(resnet_std).add_(resnet_mean)
+            scores = model_out_layers[1][1][:, 3:6, train_pad // 8: -train_pad // 8, train_pad // 8: -train_pad // 8]
             good_looking_mask = data[1].float().mul(1 / (data[1].max() + 10)).clamp_(0, 1)
-            self.summary.add_image('Train Image', img_unnorm, optim_iter)
-            self.summary.add_image('Train Mask', good_looking_mask, optim_iter)
-            self.summary.add_image('Train SDF', sdf_train.data, optim_iter)
-            self.summary.add_image('Predicted Mask', torch.sigmoid(img_mask_out.data), optim_iter)
-            self.summary.add_image('Predicted SDF', torch.sigmoid(img_sdf_out.data), optim_iter)
-            self.summary.add_image('Predicted Contour', torch.sigmoid(img_cont_out.data), optim_iter)
+            self.summary.add_image('Train Image', img_unnorm[unpad_slice], optim_iter)
+            self.summary.add_image('Train Mask', good_looking_mask[unpad_slice], optim_iter)
+            self.summary.add_image('Train SDF', sdf_train.data[unpad_slice], optim_iter)
+            self.summary.add_image('Train Contour', cont_train.data[unpad_slice], optim_iter)
+            self.summary.add_image('Predicted Mask', torch.sigmoid(img_mask_out.data[unpad_slice]), optim_iter)
+            self.summary.add_image('Predicted SDF', torch.sigmoid(img_sdf_out.data[unpad_slice]), optim_iter)
+            self.summary.add_image('Predicted Contour', torch.sigmoid(img_cont_out.data[unpad_slice]), optim_iter)
+            self.summary.add_image('Predicted Score', torch.sigmoid(scores), optim_iter)
 
         if train_pairs is None:
             self.optimizer_gen.zero_grad()
@@ -178,14 +189,16 @@ class Trainer:
         target_scores = Variable(target_scores)
         target_boxes_raw = Variable(target_boxes_raw)
 
-        img_mask_loss = binary_focal_loss_with_logits(img_mask_out, mask_train.clamp(0.05, 0.95))
-        img_sdf_loss = binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.05, 0.95))
-        img_cont_loss = binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.05, 0.95))
+        img_mask_loss = 0.02 * soft_dice_loss(F.sigmoid(img_mask_out), mask_train.clamp(0.01, 0.99))
+        img_cont_loss = 0.1 * binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.01, 0.99))
+        img_sdf_loss = 0.1 * binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.01, 0.99))
 
-        mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks.clamp(0.05, 0.95))
-        score_loss = binary_focal_loss_with_logits(pred_scores, target_scores.clamp(0.05, 0.95))
+        mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks.clamp(0.01, 0.99))
+        score_loss = binary_focal_loss_with_logits(pred_scores, target_scores.clamp(0.01, 0.99))
         box_loss = F.mse_loss(pred_boxes_raw, target_boxes_raw)
-        loss = mask_loss + box_loss + score_loss + 0.1 * (img_mask_loss + img_sdf_loss + img_cont_loss)
+        reg_loss = 1e-3 * get_reg_loss(self.model_gen)
+
+        loss = mask_loss + box_loss + score_loss + img_mask_loss + img_sdf_loss + img_cont_loss + reg_loss
 
         loss.backward()
         self.optimizer_gen.step()

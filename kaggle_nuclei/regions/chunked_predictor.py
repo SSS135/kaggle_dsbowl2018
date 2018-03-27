@@ -6,6 +6,7 @@ from torch.autograd import Variable
 
 from ..roi_align import roi_align, pad_boxes
 from ..settings import resnet_norm_mean, resnet_norm_std, train_pad, box_padding
+from ..utils import unpad
 
 img_size_div = 32
 
@@ -51,13 +52,13 @@ def extract_proposals_from_chunk(model, img, score_threshold):
     # noise = x.new(1, 1, *x.shape[2:]).normal_(0, 1)
     # x = torch.cat([x, noise], 1)
 
-    out_layers, out_img = model(Variable(x, volatile=True), train_pad)
+    out_layers, out_img = model(Variable(x, volatile=True))
     preds = [extract_proposals_from_chunk_layer(model, ly, score_threshold) for ly in out_layers]
     preds = [p for p in preds if p is not None]
     preds = [(m, s, p - (np.array(pad_offset) + border_pad) / real_scale)
-             for masks, scores, positions in preds
-             for m, s, p in zip(masks, scores, positions)]
-    preds = [(m, s, p) for m, s, p in preds if
+             for masks, scores, boxes in preds
+             for m, s, b in zip(masks, scores, boxes)]
+    preds = [(m, s, b) for m, s, b in preds if
              p[0] + m.shape[0] > 1 and
              p[1] + m.shape[1] > 1 and
              p[0] < img.shape[0] - 2 and

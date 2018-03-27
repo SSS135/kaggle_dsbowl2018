@@ -93,8 +93,7 @@ class NucleiDataset(Dataset):
             random.setstate(rstate)
             sdf = self.target_transform(sdf)
 
-            unpad = (slice(None), slice(train_pad, -train_pad), slice(train_pad, -train_pad))
-            return img, mask[unpad], sdf[unpad] #, obj_size[unpad]
+            return img, mask, sdf #, obj_size[unpad]
         else:
             return img
 

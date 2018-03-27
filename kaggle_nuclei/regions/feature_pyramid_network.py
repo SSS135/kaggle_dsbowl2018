@@ -11,6 +11,7 @@ from pretrainedmodels import dpn92
 from torch import nn
 from torch.autograd import Variable
 from torch.nn.modules.instancenorm import _InstanceNorm
+from ..utils import unpad
 
 
 class MaskHead(nn.Module):
@@ -48,7 +49,7 @@ class MaskHead(nn.Module):
         self.conv_mask_layers = nn.Sequential(*self.conv_mask_layers)
 
     def forward(self, input, unpadding):
-        return input[..., unpadding: -unpadding, unpadding: -unpadding].contiguous()
+        return unpad(input, unpadding).contiguous()
 
     def predict_masks(self, x):
         return self.conv_mask_layers(x.contiguous())
@@ -76,7 +77,7 @@ class ScoreHead(nn.Module):
         self.score_layers[-1].bias.data.fill_(-math.log((1 - init_fg_conf) / init_fg_conf))
 
     def forward(self, input, unpadding):
-        score = self.score_layers(input)[..., unpadding: -unpadding, unpadding: -unpadding].contiguous()
+        score = unpad(self.score_layers(input), unpadding).contiguous()
         return score
 
 
@@ -104,11 +105,11 @@ class BoxHead(nn.Module):
 
             nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1),
         )
-        self.layers[-1].bias.data.fill_(0)
-        self.layers[-1].weight.data.mul_(0.2)
+        # self.layers[-1].bias.data.fill_(0)
+        # self.layers[-1].weight.data.mul_(0.2)
 
     def forward(self, input, unpadding):
-        raw_boxes = self.layers(input)[..., unpadding: -unpadding, unpadding: -unpadding].contiguous()
+        raw_boxes = unpad(self.layers(input), unpadding).contiguous()
         ih, iw = raw_boxes.shape[2:]
         # boxes = Variable(boxes.data.fill_(0), requires_grad=True)
         raw_boxes = raw_boxes.view(raw_boxes.shape[0], len(self.pixel_boxes), 4, *raw_boxes.shape[2:])
@@ -148,7 +149,6 @@ class VerticalLayerSimple(nn.Module):
             nn.InstanceNorm2d(c_in, affine=True),
             nn.ReLU(True),
             ShuffleConv2d(c_in, c_out, 3, 1, 1, bias=False, groups=4),
-            SELayer(c_out),
         )
 
     def forward(self, input_layers):
@@ -234,7 +234,6 @@ class ResBlock(nn.Module):
             nn.InstanceNorm2d(c_in, affine=True),
             nn.ReLU(True),
             ShuffleConv2d(c_in, c_out, 3, 1, 1, bias=False, groups=4),
-            SELayer(c_out),
         )
 
     def forward(self, input):
@@ -369,8 +368,7 @@ class FPN(nn.Module):
 
         p2, p3, p4 = self.combine_levels((p2, p3, p4, p5), (0, 1, 2))
 
-        img = self.img_net(p2)[..., output_unpadding:-output_unpadding, output_unpadding:-output_unpadding] \
-            if self.img_net is not None else None
+        img = unpad(self.img_net(p2), output_unpadding) if self.img_net is not None else None
 
         def mask_score_box(fmap, unpadding):
             return self.mask_head(fmap, unpadding), self.score_head(fmap, unpadding), self.box_head(fmap, unpadding)
