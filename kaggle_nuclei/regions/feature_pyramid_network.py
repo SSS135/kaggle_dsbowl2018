@@ -105,7 +105,7 @@ class BoxHead(nn.Module):
 
             nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1),
         )
-        # self.layers[-1].bias.data.fill_(0)
+        self.layers[-1].bias.data.fill_(0)
         # self.layers[-1].weight.data.mul_(0.2)
 
     def forward(self, input, unpadding):
@@ -117,10 +117,11 @@ class BoxHead(nn.Module):
         anchor_pos_y = torch.arange(ih).type_as(input.data).view(1, 1, -1, 1).add_(0.5)
         anchor_pos_x = torch.arange(iw).type_as(input.data).view(1, 1, 1, -1).add_(0.5)
         anchor_pos_y, anchor_pos_x = Variable(anchor_pos_y), Variable(anchor_pos_x)
-        b_h = raw_boxes[:, :, 2].exp() * anchor_sizes[:, :, 0]
-        b_w = raw_boxes[:, :, 3].exp() * anchor_sizes[:, :, 1]
-        b_y = raw_boxes[:, :, 0] * anchor_sizes[:, :, 0] + anchor_pos_y - b_h / 2
-        b_x = raw_boxes[:, :, 1] * anchor_sizes[:, :, 1] + anchor_pos_x - b_w / 2
+        raw_boxes_lim = F.sigmoid(raw_boxes).mul(2).sub(1)
+        b_h = raw_boxes_lim[:, :, 2].exp() * anchor_sizes[:, :, 0]
+        b_w = raw_boxes_lim[:, :, 3].exp() * anchor_sizes[:, :, 1]
+        b_y = raw_boxes_lim[:, :, 0] * anchor_sizes[:, :, 0] + anchor_pos_y - b_h / 2
+        b_x = raw_boxes_lim[:, :, 1] * anchor_sizes[:, :, 1] + anchor_pos_x - b_w / 2
         # (B, yxhw, NBox, H, W)
         out_boxes = torch.stack([b_y / ih, b_x / iw, b_h / ih, b_w / iw], 1)
         anchor_part_shape = 1, len(self.pixel_boxes), anchor_pos_y.numel(), anchor_pos_x.numel()

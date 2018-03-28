@@ -6,6 +6,7 @@ import time
 import torch
 import torch.nn.functional as F
 import torch.utils.data
+from torch import optim
 from optfn.cosine_annealing import CosineAnnealingRestartParam
 from optfn.gadam import GAdam
 from optfn.param_groups_getter import get_param_groups
@@ -25,6 +26,7 @@ from ..iou import threshold_iou, iou
 from ..roi_align import roi_align, pad_boxes
 from ..settings import box_padding, train_pad, resnet_norm_mean, resnet_norm_std
 from ..losses import soft_dice_loss
+from optfn.gated_instance_norm import GatedInstanceNorm2d
 
 
 # def binary_cross_entropy_with_logits(x, z, reduce=True):
@@ -61,14 +63,14 @@ def get_reg_loss(model):
     for module in model.modules():
         if hasattr(module, 'reg_loss') and module.reg_loss is not None:
             losses.append(module.reg_loss)
-    return torch.cat(losses).sum()
+    return torch.cat(losses).sum() if len(losses) != 0 else 0
 
 
 def adjust_norm_scheme(model):
     for module in model.modules():
         for name, old_norm in module.named_children():
             if isinstance(old_norm, nn.InstanceNorm2d):
-                new_norm = LearnedNorm2d(old_norm.num_features)
+                new_norm = GatedInstanceNorm2d(old_norm.num_features)
                 # new_norm = nn.InstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
                 # new_norm = NearInstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
                 # if hasattr(new_norm, 'weight'):
@@ -105,8 +107,9 @@ class Trainer:
         self.model_gen = self.model_gen.cuda()
         self.model_gen.freeze_pretrained_layers(False)
 
-        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='output',
-                                   amsgrad=False, nesterov=0.5, weight_decay=1e-4)
+        # self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='output',
+        #                            amsgrad=False, nesterov=0.5, weight_decay=1e-4)
+        self.optimizer_gen = optim.SGD(get_param_groups(self.model_gen), lr=0.03, momentum=0.9, weight_decay=1e-4)
 
         self.scheduler_gen = CosineAnnealingRestartParam(self.optimizer_gen, len(self.dataloader), 2)
 
@@ -189,12 +192,12 @@ class Trainer:
         target_scores = Variable(target_scores)
         target_boxes_raw = Variable(target_boxes_raw)
 
-        img_mask_loss = 0.02 * soft_dice_loss(F.sigmoid(img_mask_out), mask_train.clamp(0.01, 0.99))
-        img_cont_loss = 0.1 * binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.01, 0.99))
-        img_sdf_loss = 0.1 * binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.01, 0.99))
+        img_mask_loss = 0.1 * binary_focal_loss_with_logits(img_mask_out, mask_train.clamp(0.05, 0.95))
+        img_cont_loss = 0.1 * binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.05, 0.95))
+        img_sdf_loss = 0.1 * binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.05, 0.95))
 
-        mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks.clamp(0.01, 0.99))
-        score_loss = binary_focal_loss_with_logits(pred_scores, target_scores.clamp(0.01, 0.99))
+        mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks.clamp(0.05, 0.95))
+        score_loss = binary_focal_loss_with_logits(pred_scores, target_scores.clamp(0.05, 0.95))
         box_loss = F.mse_loss(pred_boxes_raw, target_boxes_raw)
         reg_loss = 1e-3 * get_reg_loss(self.model_gen)
 
@@ -380,8 +383,13 @@ def to_raw_boxes(boxes, anchor_boxes, fmap_shape):
     anchor_boxes /= hwhw
 
     anchor_boxes[:2] += anchor_boxes[2:] / 2
+
+    def logit(x):
+        return (x / (1 - x)).log_()
+
     boxes[:2].add_(boxes[2:] / 2).sub_(anchor_boxes[:2]).div_(anchor_boxes[2:])
     boxes[2:].div_(anchor_boxes[2:]).log_()
+    boxes = logit(boxes.add_(1).div_(2))
     return boxes
 
 
