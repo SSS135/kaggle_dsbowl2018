@@ -19,6 +19,7 @@ from torch import nn
 from torch.autograd import Variable
 from tqdm import tqdm
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from collections import deque
 
 from .feature_pyramid_network import FPN
 from ..dataset import NucleiDataset
@@ -27,24 +28,25 @@ from ..roi_align import roi_align, pad_boxes
 from ..settings import box_padding, train_pad, resnet_norm_mean, resnet_norm_std
 from ..losses import soft_dice_loss
 from optfn.gated_instance_norm import GatedInstanceNorm2d
+from optfn.eval_batch_norm import EvalBatchNorm2d
 
 
-# def binary_cross_entropy_with_logits(x, z, reduce=True):
-#     bce = x.clamp(min=0) - x * z + x.abs().neg().exp().add(1).log()
-#     return bce.mean() if reduce else bce
+def binary_cross_entropy_with_logits(x, z, reduce=True):
+    bce = x.clamp(min=0) - x * z + x.abs().neg().exp().add(1).log()
+    return bce.mean() if reduce else bce
 
-def binary_focal_loss_with_logits(x, t, gamma=2, alpha=0.25):
-    p = x.sigmoid()
-    pt = p * t + (1 - p) * (1 - t)  # pt = p if t > 0 else 1-p
-    w = (1 - alpha) * t + alpha * (1 - t)  # w = 1-alpha if t > 0 else alpha
-    w = w * (1 - pt).pow(gamma)
-    return F.binary_cross_entropy_with_logits(x, t, w)
+# def binary_focal_loss_with_logits(x, t, gamma=2, alpha=0.25):
+#     p = x.sigmoid()
+#     pt = p * t + (1 - p) * (1 - t)  # pt = p if t > 0 else 1-p
+#     w = (1 - alpha) * t + alpha * (1 - t)  # w = 1-alpha if t > 0 else alpha
+#     w = w * (1 - pt).pow(gamma)
+#     return F.binary_cross_entropy_with_logits(x, t, w)
 
 
-# def binary_focal_loss_with_logits(input, target, lam=2):
-#     weight = (target - F.sigmoid(input)).abs().pow(lam)
-#     ce = F.binary_cross_entropy_with_logits(input, target, weight=weight)
-#     return ce
+def binary_focal_loss_with_logits(input, target, lam=2):
+    weight = (target - F.sigmoid(input)).abs().pow(lam)
+    ce = weight * binary_cross_entropy_with_logits(input, target, reduce=False)
+    return ce.mean()
 
 
 # def mse_focal_loss(pred, target, focal_threshold, lam=2):
@@ -84,6 +86,21 @@ def adjust_norm_scheme(model):
                 # elif hasattr(new_norm, 'running_std'):
                 #     new_norm.running_std = old_norm.running_var.sqrt_()
                 setattr(module, name, new_norm)
+            # if isinstance(old_norm, nn.BatchNorm2d):
+            #     new_norm = EvalBatchNorm2d(old_norm.num_features, affine=old_norm.affine, eps=old_norm.eps)
+            #     # new_norm = nn.InstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
+            #     # new_norm = NearInstanceNorm2d(old_norm.num_features, affine=old_norm.affine)
+            #     if hasattr(new_norm, 'weight'):
+            #         new_norm.weight = old_norm.weight
+            #     if hasattr(new_norm, 'bias'):
+            #         new_norm.bias = old_norm.bias
+            #     if hasattr(new_norm, 'running_mean'):
+            #         new_norm.running_mean = old_norm.running_mean
+            #     if hasattr(new_norm, 'running_var'):
+            #         new_norm.running_var = old_norm.running_var
+            #     elif hasattr(new_norm, 'running_std'):
+            #         new_norm.running_std = old_norm.running_var.sqrt_()
+            #     setattr(module, name, new_norm)
 
 
 class Trainer:
@@ -97,6 +114,7 @@ class Trainer:
         self.pbar = None
         self.summary: SummaryWriter = None
         self.optim_iter = 0
+        self.scalar_history = dict()
 
     def train(self, train_data, epochs=15, pretrain_epochs=7, saved_model=None, model_save_path=None):
         self.dataset = NucleiDataset(train_data)
@@ -107,9 +125,8 @@ class Trainer:
         self.model_gen = self.model_gen.cuda()
         self.model_gen.freeze_pretrained_layers(False)
 
-        # self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=2e-4, betas=(0.9, 0.999), avg_sq_mode='output',
-        #                            amsgrad=False, nesterov=0.5, weight_decay=1e-4)
-        self.optimizer_gen = optim.SGD(get_param_groups(self.model_gen), lr=0.03, momentum=0.9, weight_decay=1e-4)
+        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=0.03, weight_decay=5e-4)
+        # self.optimizer_gen = optim.SGD(get_param_groups(self.model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
 
         self.scheduler_gen = CosineAnnealingRestartParam(self.optimizer_gen, len(self.dataloader), 2)
 
@@ -137,6 +154,10 @@ class Trainer:
         # scheduler_disc.step()
 
         img, labels, sdf = [x.cuda() for x in data]
+
+        # img = (img - img.view(img.shape[0], -1).mean(-1).view(-1, 1, 1)).mul_(2)
+        img += img.new(img.shape).normal_(0, 0.03)
+
         x_train = Variable(img)
         sdf_train = Variable(sdf * 0.5 + 0.5)
         mask_train = Variable((labels > 0).float())
@@ -148,28 +169,6 @@ class Trainer:
         unpad_slice = (Ellipsis, slice(train_pad, -train_pad), slice(train_pad, -train_pad))
         train_pairs = get_train_pairs(self.model_gen, labels, sdf, img, model_out_layers)
         img_mask_out, img_sdf_out, img_cont_out = model_out_img.split(1, 1)
-
-        optim_iter = self.optim_iter + 1
-
-        batch_time = time.time() - self.prev_batch_time
-        self.prev_batch_time = time.time()
-        if optim_iter >= 100 and optim_iter % 10 == 0:
-            self.summary.add_scalar('Batch Time', batch_time, optim_iter)
-
-        if optim_iter >= 100 and optim_iter % 100 == 0:
-            resnet_std = data[0].new(resnet_norm_std).view(-1, 1, 1)
-            resnet_mean = data[0].new(resnet_norm_mean).view(-1, 1, 1)
-            img_unnorm = data[0].mul(resnet_std).add_(resnet_mean)
-            scores = model_out_layers[1][1][:, 3:6, train_pad // 8: -train_pad // 8, train_pad // 8: -train_pad // 8]
-            good_looking_mask = data[1].float().mul(1 / (data[1].max() + 10)).clamp_(0, 1)
-            self.summary.add_image('Train Image', img_unnorm[unpad_slice], optim_iter)
-            self.summary.add_image('Train Mask', good_looking_mask[unpad_slice], optim_iter)
-            self.summary.add_image('Train SDF', sdf_train.data[unpad_slice], optim_iter)
-            self.summary.add_image('Train Contour', cont_train.data[unpad_slice], optim_iter)
-            self.summary.add_image('Predicted Mask', torch.sigmoid(img_mask_out.data[unpad_slice]), optim_iter)
-            self.summary.add_image('Predicted SDF', torch.sigmoid(img_sdf_out.data[unpad_slice]), optim_iter)
-            self.summary.add_image('Predicted Contour', torch.sigmoid(img_cont_out.data[unpad_slice]), optim_iter)
-            self.summary.add_image('Predicted Score', torch.sigmoid(scores), optim_iter)
 
         if train_pairs is None:
             self.optimizer_gen.zero_grad()
@@ -218,20 +217,51 @@ class Trainer:
         f_iou = iou(pred_masks.data > 0, target_masks.data > 0.5)
         t_iou = threshold_iou(f_iou)
 
-        if optim_iter >= 100 and optim_iter % 10 == 0:
-            self.summary.add_scalar('Score FScore', score_fscore, optim_iter)
-            self.summary.add_scalar('Score Precision', score_prec, optim_iter)
-            self.summary.add_scalar('Score Recall', score_rec, optim_iter)
-            self.summary.add_scalar('Mask IoU Full', f_iou.mean(), optim_iter)
-            self.summary.add_scalar('Mask IoU Threshold', t_iou.mean(), optim_iter)
-            self.summary.add_scalar('Box IoU', box_iou.mean(), optim_iter)
-            self.summary.add_scalar('Learning Rate', self.optimizer_gen.param_groups[0]['lr'], optim_iter)
+        optim_iter = self.optim_iter + 1
+
+        batch_time = time.time() - self.prev_batch_time
+        self.prev_batch_time = time.time()
+        if optim_iter >= 100:
+            self.add_scalar_averaged('Batch Time', batch_time, optim_iter)
+
+        if optim_iter >= 100 and optim_iter % 100 == 0:
+            resnet_std = data[0].new(resnet_norm_std).view(-1, 1, 1)
+            resnet_mean = data[0].new(resnet_norm_mean).view(-1, 1, 1)
+            img_unnorm = data[0].mul(resnet_std).add_(resnet_mean)
+            scores = model_out_layers[1][1][:, 3:6, train_pad // 8: -train_pad // 8, train_pad // 8: -train_pad // 8]
+            good_looking_mask = data[1].float().mul(1 / (data[1].max() + 10)).clamp_(0, 1)
+            self.summary.add_image('Train Image', img_unnorm[unpad_slice], optim_iter)
+            self.summary.add_image('Train Mask', good_looking_mask[unpad_slice], optim_iter)
+            self.summary.add_image('Train SDF', sdf_train.data[unpad_slice], optim_iter)
+            self.summary.add_image('Train Contour', cont_train.data[unpad_slice], optim_iter)
+            self.summary.add_image('Predicted Mask', torch.sigmoid(img_mask_out.data[unpad_slice]), optim_iter)
+            self.summary.add_image('Predicted SDF', torch.sigmoid(img_sdf_out.data[unpad_slice]), optim_iter)
+            self.summary.add_image('Predicted Contour', torch.sigmoid(img_cont_out.data[unpad_slice]), optim_iter)
+            self.summary.add_image('Predicted Score', torch.sigmoid(scores), optim_iter)
+
+        if optim_iter >= 100:
+            self.add_scalar_averaged('Score FScore', score_fscore, optim_iter)
+            self.add_scalar_averaged('Score Precision', score_prec, optim_iter)
+            self.add_scalar_averaged('Score Recall', score_rec, optim_iter)
+            self.add_scalar_averaged('Mask IoU Full', f_iou.mean(), optim_iter)
+            self.add_scalar_averaged('Mask IoU Threshold', t_iou.mean(), optim_iter)
+            self.add_scalar_averaged('Box IoU', box_iou.mean(), optim_iter)
+            self.add_scalar_averaged('Learning Rate', self.optimizer_gen.param_groups[0]['lr'], optim_iter)
             self.summary.add_histogram('Masks Per Level', batch_masks, optim_iter)
             self.summary.add_histogram('Full Mask IoU Hist', f_iou, optim_iter)
             self.summary.add_histogram('Threshold Mask IoU Hist', t_iou, optim_iter)
             self.summary.add_histogram('Box IoU Hist', box_iou, optim_iter)
 
         self.optim_iter += 1
+
+    def add_scalar_averaged(self, tag, scalar_value, global_step):
+        hist_size = 50
+        if tag not in self.scalar_history:
+            self.scalar_history[tag] = deque(maxlen=hist_size)
+        hist = self.scalar_history[tag]
+        hist.append(scalar_value)
+        if global_step % hist_size == 0:
+            self.summary.add_scalar(tag, np.mean(hist), global_step)
 
 
 def get_train_pairs(
