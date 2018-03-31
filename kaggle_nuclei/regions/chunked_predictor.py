@@ -12,13 +12,13 @@ from ..settings import resnet_norm_mean, resnet_norm_std, train_pad, box_padding
 from ..utils import unpad
 
 
-def extract_proposals_transformed(model, img, scale, rotation, hflip, vflip, score_threshold):
+def extract_proposals_transformed(model, img, scale, rotation, hflip, vflip, score_threshold, max_chunk_proposals=0):
     transf_matrix = get_affine_matrix(scale, rotation, hflip, vflip)
     tr_img = affine_transform_image(img, transf_matrix)
-    masks, scores, boxes = extract_proposals(model, tr_img, score_threshold)
+    masks, scores, boxes = extract_proposals(model, tr_img, score_threshold, max_chunk_proposals)
 
 
-def extract_proposals(model, img, score_threshold):
+def extract_proposals(model, img, score_threshold, max_chunk_proposals):
     assert img.dim() == 3 and img.shape[0] == 3
 
     nc, raw_h, raw_w = img.shape
@@ -39,7 +39,8 @@ def extract_proposals(model, img, score_threshold):
         crop_t, crop_l = h_crop_idx * train_size, w_crop_idx * train_size
         crop_b, crop_r = crop_t + crop_side, crop_l + crop_side
         crop = img[:, crop_t:crop_b, crop_l:crop_l].contiguous()
-        crop_masks, crop_scores, crop_boxes = extract_proposals_from_chunk(model, crop, score_threshold)
+        crop_masks, crop_scores, crop_boxes = extract_proposals_from_chunk(
+            model, crop, score_threshold, max_chunk_proposals)
         crop_boxes[:, 0] += crop_t
         crop_boxes[:, 1] += crop_l
         all_masks.append(crop_masks)
@@ -52,7 +53,7 @@ def extract_proposals(model, img, score_threshold):
     return all_masks, all_scores, all_boxes
 
 
-def extract_proposals_from_chunk(model, img, score_threshold):
+def extract_proposals_from_chunk(model, img, score_threshold, max_chunk_proposals):
     x = torch.from_numpy(img).cuda()
     x = tsf.Normalize(mean=resnet_norm_mean, std=resnet_norm_std)(x)
     x = x.unsqueeze(0)

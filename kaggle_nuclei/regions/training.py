@@ -26,7 +26,7 @@ from ..dataset import NucleiDataset
 from ..iou import threshold_iou, iou
 from ..roi_align import roi_align, pad_boxes
 from ..settings import box_padding, train_pad, resnet_norm_mean, resnet_norm_std
-from ..losses import soft_dice_loss
+from ..losses import soft_dice_loss_with_logits
 from optfn.gated_instance_norm import GatedInstanceNorm2d
 from optfn.eval_batch_norm import EvalBatchNorm2d
 
@@ -125,7 +125,8 @@ class Trainer:
         self.model_gen = self.model_gen.cuda()
         self.model_gen.freeze_pretrained_layers(False)
 
-        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=0.03, weight_decay=5e-4)
+        self.optimizer_gen = GAdam(get_param_groups(self.model_gen), lr=3e-4, weight_decay=1e-4,
+                                   nesterov=0.5, avg_sq_mode='output')
         # self.optimizer_gen = optim.SGD(get_param_groups(self.model_gen), lr=0.02, momentum=0.9, weight_decay=1e-4)
 
         self.scheduler_gen = CosineAnnealingRestartParam(self.optimizer_gen, len(self.dataloader), 2)
@@ -150,9 +151,14 @@ class Trainer:
 
     def optim_step(self, data):
         self.optimizer_gen.zero_grad()
+        loss = self.calc_loss(data)
+        if loss is not None:
+            loss.backward()
+            self.optimizer_gen.step()
+        self.optimizer_gen.zero_grad()
         self.scheduler_gen.step()
-        # scheduler_disc.step()
 
+    def calc_loss(self, data):
         img, labels, sdf = [x.cuda() for x in data]
 
         # img = (img - img.view(img.shape[0], -1).mean(-1).view(-1, 1, 1)).mul_(2)
@@ -172,7 +178,7 @@ class Trainer:
 
         if train_pairs is None:
             self.optimizer_gen.zero_grad()
-            return
+            return None
 
         pred_features, target_masks, pred_scores, target_scores, \
         pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops, layer_idx = train_pairs
@@ -183,28 +189,20 @@ class Trainer:
         batch_masks = np.zeros(len(self.model_gen.mask_pixel_sizes))
         batch_masks[bm_idx] += bm_count
 
-        # if return_predictions_at_epoch is not None and return_predictions_at_epoch == epoch:
-        #     return pred_masks.data.cpu(), target_masks.cpu(), img_crops.cpu(), \
-        #            x_train.data.cpu(), labels.cpu(), model_out_img.data.cpu(), model_gen
-
         target_masks = Variable(target_masks)
         target_scores = Variable(target_scores)
         target_boxes_raw = Variable(target_boxes_raw)
 
-        img_mask_loss = 0.1 * binary_focal_loss_with_logits(img_mask_out, mask_train.clamp(0.05, 0.95))
-        img_cont_loss = 0.1 * binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.05, 0.95))
-        img_sdf_loss = 0.1 * binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.05, 0.95))
+        img_mask_loss = 0.1 * soft_dice_loss_with_logits(img_mask_out, mask_train)
+        img_cont_loss = 0.5 * binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.05, 0.95))
+        img_sdf_loss = 0.5 * binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.05, 0.95))
 
-        mask_loss = binary_focal_loss_with_logits(pred_masks, target_masks.clamp(0.05, 0.95))
-        score_loss = binary_focal_loss_with_logits(pred_scores, target_scores.clamp(0.05, 0.95))
+        mask_loss = 0.5 * soft_dice_loss_with_logits(pred_masks, target_masks)
+        score_loss = 2 * binary_focal_loss_with_logits(pred_scores, target_scores)
         box_loss = F.mse_loss(pred_boxes_raw, target_boxes_raw)
         reg_loss = 1e-3 * get_reg_loss(self.model_gen)
 
         loss = mask_loss + box_loss + score_loss + img_mask_loss + img_sdf_loss + img_cont_loss + reg_loss
-
-        loss.backward()
-        self.optimizer_gen.step()
-        self.optimizer_gen.zero_grad()
 
         box_iou = aabb_iou(pred_boxes, target_boxes)
 
@@ -247,12 +245,12 @@ class Trainer:
             self.add_scalar_averaged('Mask IoU Threshold', t_iou.mean(), optim_iter)
             self.add_scalar_averaged('Box IoU', box_iou.mean(), optim_iter)
             self.add_scalar_averaged('Learning Rate', self.optimizer_gen.param_groups[0]['lr'], optim_iter)
-            self.summary.add_histogram('Masks Per Level', batch_masks, optim_iter)
-            self.summary.add_histogram('Full Mask IoU Hist', f_iou, optim_iter)
-            self.summary.add_histogram('Threshold Mask IoU Hist', t_iou, optim_iter)
-            self.summary.add_histogram('Box IoU Hist', box_iou, optim_iter)
+            for b_i, b_c in enumerate(batch_masks):
+                self.add_scalar_averaged(f'Masks At Level {b_i}', b_c, optim_iter)
 
         self.optim_iter += 1
+
+        return loss
 
     def add_scalar_averaged(self, tag, scalar_value, global_step):
         hist_size = 50

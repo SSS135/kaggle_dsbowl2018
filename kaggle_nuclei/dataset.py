@@ -10,16 +10,6 @@ from .settings import train_pad, train_size, resnet_norm_std, resnet_norm_mean, 
 from .transforms import RandomAffineCrop
 
 
-# bad_ids = {
-#     '19f0653c33982a416feed56e5d1ce6849fd83314fd19dfa1c5b23c6b66e9868a', # very many mistakes
-#     '12aeefb1b522b283819b12e4cfaf6b13c1264c0aadac3412b4edd2ace304cb40', # very many mistakes
-#     '7b38c9173ebe69b4c6ba7e703c0c27f39305d9b2910f46405993d2ea7a963b80', # worst
-#     '193ffaa5272d5c421ae02130a64d98ad120ec70e4ed97a72cdcd4801ce93b066', # big white thing at side
-#     'b1eb0123fe2d8c825694b193efb7b923d95effac9558ee4eaf3116374c2c94fe', # many mistakes
-#     'adc315bd40d699fd4e4effbcce81cd7162851007f485d754ad3b0472f73a86df', # many mistakes
-# }
-
-
 class NucleiDataset(Dataset):
     def __init__(self, data, normalize_scale_by_obj_area=True, normalize_image_sample_freq=True):
         self.has_mask = 'mask_compressed' in data[0]
@@ -39,11 +29,6 @@ class NucleiDataset(Dataset):
             sample_freqs *= total_samples / sample_freqs.sum()
             sample_freqs = sample_freqs.round().clip(1, 8).astype(np.int32)
             self.index_map = np.repeat(self.index_map, sample_freqs)
-
-        # if self.has_mask:
-        #     self.datas = [d for d in data if d['name'] not in bad_ids]
-        # else:
-        #     self.datas = data
 
         crop_conf = dict(
             size=train_size + train_pad * 2, padding=train_pad, rotation={(0, 360)},

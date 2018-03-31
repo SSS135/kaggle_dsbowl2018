@@ -7,10 +7,12 @@ import torch
 import torch.nn.functional as F
 from optfn.se_module import SELayer
 from optfn.shuffle_conv import ShuffleConv2d
-from pretrainedmodels import dpn92
+from pretrainedmodels import dpn92, dpn68, dpn68b, nasnetalarge, resnext101_32x4d
 from torch import nn
 from torch.autograd import Variable
 from torch.nn.modules.instancenorm import _InstanceNorm
+from torchvision.models import resnet50
+
 from ..utils import unpad
 
 
@@ -243,6 +245,48 @@ class ResBlock(nn.Module):
         return x
 
 
+def get_features(network):
+    if network == 'resnet50':
+        rn = resnet50(True)
+        features = nn.ModuleList([
+            nn.Sequential(rn.conv1, rn.bn1, rn.relu, rn.maxpool, rn.layer1),
+            rn.layer2,
+            rn.layer3,
+            rn.layer4
+        ])
+        channels = 256, 512, 1024, 2048
+    elif network == 'resnext101_32x4d':
+        features = nn.ModuleList(list(resnext101_32x4d().features)[:8])
+        features = nn.ModuleList([
+            nn.Sequential(*features[:5]),
+            features[5],
+            features[6],
+            features[7],
+        ])
+        channels = 256, 512, 1024, 2048
+    elif network == 'dpn68b':
+        dpn = list(dpn68b().features)
+        features = nn.ModuleList([
+            nn.Sequential(*dpn[:4]),
+            nn.Sequential(*dpn[4:8]),
+            nn.Sequential(*dpn[8:20]),
+            nn.Sequential(*dpn[20:23])
+        ])
+        channels = 144, 320, 704, 832
+    elif network == 'dpn92':
+        dpn = list(dpn92().features)
+        features = nn.ModuleList([
+            nn.Sequential(*dpn[:4]),
+            nn.Sequential(*dpn[4:8]),
+            nn.Sequential(*dpn[8:28]),
+            nn.Sequential(*dpn[28:31])
+        ])
+        channels = 336, 704, 1552, 2688
+    else:
+        raise ValueError(network)
+    return features, channels
+
+
 class FPN(nn.Module):
     mask_size = 28
     region_size = 7
@@ -254,24 +298,15 @@ class FPN(nn.Module):
 
         self.mask_pixel_sizes = (1, 2, 4)
         self.mask_strides = (4, 8, 16)
-        # rn = resnet50(True)
-        # self.resnet = nn.ModuleList([rn.conv1, rn.bn1, rn.relu, rn.maxpool, rn.layer1, rn.layer2, rn.layer3, rn.layer4])
-        # self.resnet = nn.ModuleList(list(resnext101_32x4d().features)[:8])
-        dpn = list(dpn92().features)
-        self.resnet = nn.ModuleList([
-            nn.Sequential(*dpn[:4]),
-            nn.Sequential(*dpn[4:8]),
-            nn.Sequential(*dpn[8:28]),
-            nn.Sequential(*dpn[28:31])
-        ])
+        self.resnet, lat_channels = get_features('dpn92')
 
         # Top layer
-        self.toplayer = nn.Conv2d(2688, num_filters, kernel_size=1, stride=1, padding=0, bias=False)  # Reduce channels
+        self.toplayer = nn.Conv2d(lat_channels[3], num_filters, kernel_size=1, stride=1, padding=0, bias=False)  # Reduce channels
 
         # Lateral layers
-        self.latlayer1 = nn.Conv2d(1552, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
-        self.latlayer2 = nn.Conv2d(704, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
-        self.latlayer3 = nn.Conv2d(336, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        self.latlayer1 = nn.Conv2d(lat_channels[2], num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        self.latlayer2 = nn.Conv2d(lat_channels[1], num_filters, kernel_size=1, stride=1, padding=0, bias=False)
+        self.latlayer3 = nn.Conv2d(lat_channels[0], num_filters, kernel_size=1, stride=1, padding=0, bias=False)
         # self.latlayer4 = nn.Conv2d(64, num_filters, kernel_size=1, stride=1, padding=0, bias=False)
 
         if self.enable_bidir:
@@ -363,6 +398,8 @@ class FPN(nn.Module):
         p3 = self.latlayer2(c3)
         p2 = self.latlayer3(c2)
         # p1 = self.latlayer4(c1)
+
+        del x, c5, c4, c3, c2
 
         if self.enable_bidir:
             p2, p3, p4, p5 = self.bidir((p2, p3, p4, p5))
