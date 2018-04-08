@@ -24,7 +24,7 @@ from collections import deque
 from .feature_pyramid_network import FPN
 from ..dataset import NucleiDataset
 from ..iou import threshold_iou, iou
-from ..roi_align import roi_align, pad_boxes
+from ..roi_align import roi_align
 from ..settings import box_padding, train_pad, resnet_norm_mean, resnet_norm_std
 from ..losses import soft_dice_loss_with_logits
 from optfn.gated_instance_norm import GatedInstanceNorm2d
@@ -181,7 +181,7 @@ class Trainer:
             return None
 
         pred_features, target_masks, pred_scores, target_scores, \
-        pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops, layer_idx = train_pairs
+        pred_boxes, target_boxes, img_crops, layer_idx = train_pairs
 
         pred_masks = self.model_gen.predict_masks(pred_features)
 
@@ -191,20 +191,20 @@ class Trainer:
 
         target_masks = Variable(target_masks)
         target_scores = Variable(target_scores)
-        target_boxes_raw = Variable(target_boxes_raw)
+        target_boxes = Variable(target_boxes)
 
         img_mask_loss = 0.1 * soft_dice_loss_with_logits(img_mask_out, mask_train)
         img_cont_loss = 0.5 * binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.05, 0.95))
         img_sdf_loss = 0.5 * binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.05, 0.95))
 
         mask_loss = 0.5 * soft_dice_loss_with_logits(pred_masks, target_masks)
-        score_loss = 2 * binary_focal_loss_with_logits(pred_scores, target_scores)
-        box_loss = F.mse_loss(pred_boxes_raw, target_boxes_raw)
+        score_loss = 2 * binary_focal_loss_with_logits(pred_scores, target_scores.clamp(0.05, 0.95))
+        box_loss = F.mse_loss(pred_boxes, target_boxes)
         reg_loss = 1e-3 * get_reg_loss(self.model_gen)
 
         loss = mask_loss + box_loss + score_loss + img_mask_loss + img_sdf_loss + img_cont_loss + reg_loss
 
-        box_iou = aabb_iou(pred_boxes, target_boxes)
+        # box_iou = aabb_iou(pred_boxes, target_boxes)
 
         pred_score_np = (pred_scores.data > 0).cpu().numpy().reshape(-1)
         target_score_np = (target_scores.data > 0.5).byte().cpu().numpy().reshape(-1)
@@ -219,14 +219,12 @@ class Trainer:
 
         batch_time = time.time() - self.prev_batch_time
         self.prev_batch_time = time.time()
-        if optim_iter >= 100:
-            self.add_scalar_averaged('Batch Time', batch_time, optim_iter)
 
         if optim_iter >= 100 and optim_iter % 100 == 0:
             resnet_std = data[0].new(resnet_norm_std).view(-1, 1, 1)
             resnet_mean = data[0].new(resnet_norm_mean).view(-1, 1, 1)
             img_unnorm = data[0].mul(resnet_std).add_(resnet_mean)
-            scores = model_out_layers[1][1][:, 3:6, train_pad // 8: -train_pad // 8, train_pad // 8: -train_pad // 8]
+            # scores = model_out_layers[1][1][:, 3:6, train_pad // 8: -train_pad // 8, train_pad // 8: -train_pad // 8]
             good_looking_mask = data[1].float().mul(1 / (data[1].max() + 10)).clamp_(0, 1)
             self.summary.add_image('Train Image', img_unnorm[unpad_slice], optim_iter)
             self.summary.add_image('Train Mask', good_looking_mask[unpad_slice], optim_iter)
@@ -235,45 +233,48 @@ class Trainer:
             self.summary.add_image('Predicted Mask', torch.sigmoid(img_mask_out.data[unpad_slice]), optim_iter)
             self.summary.add_image('Predicted SDF', torch.sigmoid(img_sdf_out.data[unpad_slice]), optim_iter)
             self.summary.add_image('Predicted Contour', torch.sigmoid(img_cont_out.data[unpad_slice]), optim_iter)
-            self.summary.add_image('Predicted Score', torch.sigmoid(scores), optim_iter)
+            # self.summary.add_image('Predicted Score', torch.sigmoid(scores), optim_iter)
 
-        if optim_iter >= 100:
-            self.add_scalar_averaged('Score FScore', score_fscore, optim_iter)
-            self.add_scalar_averaged('Score Precision', score_prec, optim_iter)
-            self.add_scalar_averaged('Score Recall', score_rec, optim_iter)
-            self.add_scalar_averaged('Mask IoU Full', f_iou.mean(), optim_iter)
-            self.add_scalar_averaged('Mask IoU Threshold', t_iou.mean(), optim_iter)
-            self.add_scalar_averaged('Box IoU', box_iou.mean(), optim_iter)
-            self.add_scalar_averaged('Learning Rate', self.optimizer_gen.param_groups[0]['lr'], optim_iter)
-            for b_i, b_c in enumerate(batch_masks):
-                self.add_scalar_averaged(f'Masks At Level {b_i}', b_c, optim_iter)
+        self.add_scalar_averaged('Batch Time', batch_time, optim_iter)
+        self.add_scalar_averaged('Score FScore', score_fscore, optim_iter)
+        self.add_scalar_averaged('Score Precision', score_prec, optim_iter)
+        self.add_scalar_averaged('Score Recall', score_rec, optim_iter)
+        self.add_scalar_averaged('Mask IoU Full', f_iou.mean(), optim_iter)
+        self.add_scalar_averaged('Mask IoU Threshold', t_iou.mean(), optim_iter)
+        # self.add_scalar_averaged('Box IoU', box_iou.mean(), optim_iter)
+        self.add_scalar_averaged('Learning Rate', self.optimizer_gen.param_groups[0]['lr'], optim_iter)
+        for b_i, b_c in enumerate(batch_masks):
+            self.add_scalar_averaged(f'Masks At Level {b_i}', b_c, optim_iter)
 
         self.optim_iter += 1
 
         return loss
 
     def add_scalar_averaged(self, tag, scalar_value, global_step):
+        if isinstance(scalar_value, Variable):
+            scalar_value = scalar_value.data.view(1)[0]
         hist_size = 50
         if tag not in self.scalar_history:
-            self.scalar_history[tag] = deque(maxlen=hist_size)
+            self.scalar_history[tag] = []
         hist = self.scalar_history[tag]
         hist.append(scalar_value)
-        if global_step % hist_size == 0:
+        if len(hist) == hist_size:
             self.summary.add_scalar(tag, np.mean(hist), global_step)
+            hist.clear()
 
 
 def get_train_pairs(
         model, labels, sdf, img, net_out,
         pos_sdf_threshold=0.1, neg_sdf_threshold=-0.1,
-        pos_iou_limit=0.4, neg_iou_limit=0.3,
+        pos_area_limit=1, neg_area_limit=2,
         pos_samples=32, neg_to_pos_ratio=3):
     outputs = []
     for sample_idx in range(labels.shape[0]):
-        net_out_sample = [(m[sample_idx], s[sample_idx], (b[0][sample_idx], b[1][sample_idx], b[2])) for m, s, b in net_out]
+        net_out_sample = [(m[sample_idx], s[sample_idx], b[sample_idx]) for m, s, b in net_out]
         o = get_train_pairs_single(
             model, labels[sample_idx, 0], sdf[sample_idx, 0], img[sample_idx], net_out_sample,
             model.mask_pixel_sizes, pos_sdf_threshold, neg_sdf_threshold,
-            pos_iou_limit, neg_iou_limit,
+            pos_area_limit, neg_area_limit,
             pos_samples, neg_to_pos_ratio
         )
         outputs.extend(o)
@@ -283,11 +284,10 @@ def get_train_pairs(
 
     outputs = list(zip(*outputs))
     outputs, layer_idx = outputs[:-1], np.concatenate(outputs[-1])
-    pred_features, target_masks, pred_scores, target_scores, \
-    pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops = \
+    pred_features, target_masks, pred_scores, target_scores, pred_boxes, target_boxes, img_crops = \
         [torch.cat(o, 0) for o in outputs]
     return pred_features, target_masks, pred_scores, target_scores, \
-           pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops, layer_idx
+           pred_boxes, target_boxes, img_crops, layer_idx
 
 
 def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
@@ -311,11 +311,13 @@ def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
     return outputs
 
 
-def generate_samples_for_layer(model, out_features, out_scores, out_boxes, labels, sdf, obj_boxes, img,
+def generate_samples_for_layer(model, out_features, out_scores, out_boxes, labels, sdf, true_boxes, img,
                                pos_sdf_threshold, neg_sdf_threshold,
-                               pos_iou_limit, neg_iou_limit,
-                               pos_samples, neg_to_pos_ratio, box_padding=box_padding):
-    out_boxes, raw_boxes, anchor_boxes = out_boxes
+                               pos_area_limit, neg_area_limit,
+                               pos_samples, neg_to_pos_ratio):
+    assert out_boxes.dim() == 3 and out_boxes.shape[0] == 6
+    assert true_boxes.dim() == 3 and true_boxes.shape[0] == 6
+    assert out_boxes.shape[1] == out_boxes.shape[2]
 
     # border and stride for converting between image space and conv-center space
     stride = model.mask_size // model.region_size
@@ -327,26 +329,28 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
         slice(border, -border + 1, stride))
     # [fs, fs] - sdf at conv centers
     sdf_fs = sdf[mask_centers_slice]
-    # [(y, x, h, w), fs, fs] - obj boxes at conv centers
-    target_boxes_fs = obj_boxes[(slice(None), *mask_centers_slice)].contiguous()
-    # target_boxes_fs[0] -= target_boxes_fs[2] * box_padding
-    # target_boxes_fs[1] -= target_boxes_fs[3] * box_padding
-    # target_boxes_fs[2:] *= 1 + 2 * box_padding
-    target_boxes_fs = target_boxes_fs.float() / target_boxes_fs.new(2 * [*labels.shape[:2]]).view(-1, 1, 1)
+    # [(y, x, cov00, cov01, cov10, cov11), fs, fs] - obj boxes at conv centers
+    true_boxes_fs = true_boxes[(slice(None), *mask_centers_slice)].contiguous()
 
-    assert target_boxes_fs.shape[-1] == anchor_boxes.shape[-1], \
-        (target_boxes_fs.shape, anchor_boxes.shape, out_boxes.shape, out_features.shape,
-         labels.shape, sdf.shape, img.shape)
+    assert true_boxes_fs.shape[-1] == out_features.shape[-1], \
+        (true_boxes_fs.shape, out_boxes.shape, out_features.shape, labels.shape, sdf.shape, img.shape)
 
-    anchor_iou = aabb_iou(
-        target_boxes_fs.unsqueeze(1).expand_as(anchor_boxes).contiguous().view(anchor_boxes.shape[0], -1).t(),
-        anchor_boxes.view(anchor_boxes.shape[0], -1).t()
-    ).view(*anchor_boxes.shape[1:])
+    anchor_box_area = (model.region_size / out_boxes.shape[-1]) ** 2
+    max_pos_area, min_pos_area = anchor_box_area * 2 ** pos_area_limit, anchor_box_area * 2 ** -pos_area_limit
+    max_neg_area, min_neg_area = anchor_box_area * 2 ** neg_area_limit, anchor_box_area * 2 ** -neg_area_limit
 
-    # assert sdf_fs.shape == out_masks.shape[-2:], (sdf_fs.shape, out_masks.shape)
+    true_box_cov = true_boxes_fs[2:].view(2, 2, *true_boxes_fs.shape[1:])
+    true_box_dets = true_box_cov[0, 0] * true_box_cov[1, 1] - true_box_cov[1, 0] * true_box_cov[0, 1]
+    true_box_areas = true_box_dets ** 0.5
 
-    pos_centers_fmap = (anchor_iou > pos_iou_limit) & (sdf_fs > pos_sdf_threshold)
-    neg_centers_fmap = (anchor_iou < neg_iou_limit) | (sdf_fs < neg_sdf_threshold)
+    assert true_box_areas.min() >= 0
+
+    pos_centers_fmap = (true_box_areas > min_pos_area) & \
+                       (true_box_areas < max_pos_area) & \
+                       (sdf_fs > pos_sdf_threshold)
+    neg_centers_fmap = (true_box_areas > max_neg_area) | \
+                       (true_box_areas < min_neg_area) | \
+                       (sdf_fs < neg_sdf_threshold)
 
     # TODO: allow zero negative centers
     if pos_centers_fmap.sum() == 0 or neg_centers_fmap.sum() == 0:
@@ -367,20 +371,20 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     target_scores = out_scores.data.new(pred_scores.shape[0]).fill_(0)
     target_scores[:pred_pos_scores.shape[0]] = 1
 
-    # ([y, x, h, w], NPos)
-    mask_boxes = out_boxes.data.view(out_boxes.shape[0], -1)[:, pos_centers_fmap_idx]
-    pred_boxes_raw = raw_boxes.view(raw_boxes.shape[0], -1)[:, pos_centers_fmap_idx_all]
-    pred_boxes = out_boxes.data.view(out_boxes.shape[0], -1)[:, pos_centers_fmap_idx_all]
-    target_boxes = target_boxes_fs.unsqueeze(1).repeat(1, anchor_boxes.shape[1], 1, 1)
-    target_boxes = target_boxes.view(target_boxes_fs.shape[0], -1)[:, pos_centers_fmap_idx_all]
-    anchor_boxes_selected = anchor_boxes.view(target_boxes_fs.shape[0], -1)[:, pos_centers_fmap_idx_all]
-    target_boxes_raw = to_raw_boxes(target_boxes, anchor_boxes_selected, anchor_boxes.shape[-2:])
+    # (NPos, [y, x, h, w, sin, cos])
+    pred_boxes = out_boxes.view(out_boxes.shape[0], -1)[:, pos_centers_fmap_idx_all].t()
+    # (NPos, 2, 2)
+    pred_cov = torch.bmm(create_scale_mat(pred_boxes[:, 2:4]), create_rot_mat(pred_boxes[:, 4:6]))
+    pred_cov = torch.bmm(pred_cov.transpose(1, 2), pred_cov)
+    pred_pos = pred_boxes[:, :2]
+    # (NPos, [y, x, cov00, cov01, cov10, cov11])
+    pred_boxes = torch.cat([pred_pos, pred_cov.view(-1, 4)], 1)
+    # (NPos, [y, x, cov00, cov01, cov10, cov11])
+    target_boxes = true_boxes_fs.view(true_boxes_fs.shape[0], -1)[:, pos_centers_fmap_idx_all].t().clone()
+    target_boxes[:, 2:] *= (1 + box_padding) ** 2
 
-    mask_boxes = mask_boxes.t()
-    pred_boxes_raw, target_boxes_raw = pred_boxes_raw.t(), target_boxes_raw.t()
-    pred_boxes, target_boxes = pred_boxes.t(), target_boxes.t()
-
-    mask_boxes = pad_boxes(mask_boxes, box_padding)
+    # (NPos, [y, x, h, w, sin, cos])
+    mask_boxes = out_boxes.data.view(out_boxes.shape[0], -1)[:, pos_centers_fmap_idx].t()
 
     pred_features = roi_align(out_features.unsqueeze(0), mask_boxes, model.region_size)
     img_crops = roi_align(
@@ -389,103 +393,94 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
         model.mask_size
     ).data
 
-    pos_center_label_nums = labels[mask_centers_slice].unsqueeze(0).repeat(anchor_boxes.shape[1], 1, 1)
+    # [fs, fs] - labels at conv centers
+    pos_center_label_nums = labels[mask_centers_slice]
+    # NPos - labels at center of true boxes
     pos_center_label_nums = pos_center_label_nums.take(pos_centers_fmap_idx)
-
     target_masks = labels_to_mask_roi_align(labels, mask_boxes, pos_center_label_nums, model.mask_size)
 
-    return pred_features, target_masks, pred_scores, target_scores, \
-           pred_boxes, target_boxes, pred_boxes_raw, target_boxes_raw, img_crops
+    return pred_features, target_masks, pred_scores, target_scores, pred_boxes, target_boxes, img_crops
 
 
-def to_raw_boxes(boxes, anchor_boxes, fmap_shape):
-    assert boxes.shape == anchor_boxes.shape
-    assert boxes.dim() == 2
-    assert boxes.shape[0] == 4
-    assert len(fmap_shape) == 2
+def create_scale_mat(yx):
+    assert yx.dim() == 2 and yx.shape[1] == 2
+    mat = Variable(yx.data.new(yx.shape[0], 2, 2).zero_())
+    mat[:, 0, 0] = yx[:, 1]
+    mat[:, 1, 1] = yx[:, 0]
+    return mat
 
-    boxes, anchor_boxes = boxes.clone(), anchor_boxes.clone()
 
-    hwhw = boxes.new(2 * [*fmap_shape]).unsqueeze(1)
-    boxes /= hwhw
-    anchor_boxes /= hwhw
+def create_rot_mat(sincos):
+    assert sincos.dim() == 2 and sincos.shape[1] == 2
+    mat = Variable(sincos.data.new(sincos.shape[0], 2, 2).zero_())
+    mat[:, 0, 1] = sincos[:, 0]
+    mat[:, 1, 0] = -sincos[:, 0]
+    mat[:, 0, 0] = mat[:, 1, 1] = sincos[:, 1]
+    return mat
 
-    anchor_boxes[:2] += anchor_boxes[2:] / 2
 
-    def logit(x):
-        return (x / (1 - x)).log_()
-
-    boxes[:2].add_(boxes[2:] / 2).sub_(anchor_boxes[:2]).div_(anchor_boxes[2:])
-    boxes[2:].div_(anchor_boxes[2:]).log_()
-    boxes = logit(boxes.add_(1).div_(2))
-    return boxes
+# def to_raw_boxes(boxes, anchor_boxes, fmap_shape):
+#     assert boxes.shape == anchor_boxes.shape
+#     assert boxes.dim() == 2
+#     assert boxes.shape[0] == 4
+#     assert len(fmap_shape) == 2
+#
+#     boxes, anchor_boxes = boxes.clone(), anchor_boxes.clone()
+#
+#     hwhw = boxes.new(2 * [*fmap_shape]).unsqueeze(1)
+#     boxes /= hwhw
+#     anchor_boxes /= hwhw
+#
+#     anchor_boxes[:2] += anchor_boxes[2:] / 2
+#
+#     def logit(x):
+#         return (x / (1 - x)).log_()
+#
+#     boxes[:2].add_(boxes[2:] / 2).sub_(anchor_boxes[:2]).div_(anchor_boxes[2:])
+#     boxes[2:].div_(anchor_boxes[2:]).log_()
+#     boxes = logit(boxes.add_(1).div_(2))
+#     return boxes
 
 
 def get_object_boxes(labels, downsampling=1):
-    # [size, size]
+    # [src_size, src_size]
     assert labels.dim() == 2
     assert labels.shape[0] == labels.shape[1]
 
-    src_labels_shape = labels.shape
     if downsampling != 1:
         labels = downscale_nonzero(labels, downsampling)
 
+    size = labels.shape[0]
     count = labels.max()
     if count == 0:
-        return torch.zeros(4, *src_labels_shape).cuda()
+        return torch.zeros(6, size * downsampling, size * downsampling).cuda()
 
-    # [count] with [1, count]
-    label_nums = torch.arange(1, count + 1).long().cuda()
-    # [count, size, size] with [0, 1]
-    masks = (labels.unsqueeze(0) == label_nums.view(-1, 1, 1)).float()
+    boxes = torch.zeros(6, size, size).cuda()
 
-    # [new count] with [1, old count]
-    nonzero_idx = (masks.view(masks.shape[0], -1).sum(-1) != 0).nonzero().squeeze()
-    count = len(nonzero_idx)
-    assert count != 0
-    # [count, size, size] with [0, 1]
-    masks = masks.index_select(0, nonzero_idx)
-
-    # [size] with [0, size - 1] ascending
-    size_range = torch.arange(labels.shape[0]).cuda()
-    # [size] with [0, size - 1] descending
-    size_range_rev = torch.arange(labels.shape[0] - 1, -1, -1).cuda()
-
-    # [count, size, size] with [0, size), filtered by mask, ascending by 1 dim
-    y_range_mask = masks * size_range.view(1, -1, 1)
-    # [count, size, size] with [0, size), filtered by mask, descending by 1 dim
-    y_range_mask_rev = masks * size_range_rev.view(1, -1, 1)
-    # [count, size, size] with [0, size), filtered by mask, ascending by 2 dim
-    x_range_mask = masks * size_range.view(1, 1, -1)
-    # [count, size, size] with [0, size), filtered by mask, descending by 2 dim
-    x_range_mask_rev = masks * size_range_rev.view(1, 1, -1)
-
-    # [count] with [0, size)
-    y_max = y_range_mask.view(count, -1).max(1)[0]
-    x_max = x_range_mask.view(count, -1).max(1)[0]
-    y_min = labels.shape[0] - 1 - y_range_mask_rev.view(count, -1).max(1)[0]
-    x_min = labels.shape[0] - 1 - x_range_mask_rev.view(count, -1).max(1)[0]
-    assert y_min.dim() == 1, y_min.shape
-
-    # [count, 4] with [0, size], in format [y, x, h, w] at dim 1
-    box_vec = torch.stack([y_min, x_min, y_max - y_min, x_max - x_min], 1)
-    assert box_vec.shape == (count, 4)
-    # [count, 4, size, size], filtered by mask, in format [y, x, h, w] at dim 1
-    box_mask = masks.unsqueeze(1) * box_vec.view(count, 4, 1, 1)
-    # [4, size, size], filtered by mask, in format [y, x, h, w] at dim 0
-    box_mask = box_mask.sum(0)
+    for label_num in range(1, count + 1):
+        mask = labels == label_num
+        # [num_px, 2]
+        px_pos = mask.nonzero().float().add_(0.5).div_(size)
+        if len(px_pos) < 9 or ((px_pos != px_pos[0]).sum(0) != 0).sum() < 2:
+            continue
+        # [2]
+        mean_pos = px_pos.mean(0)
+        cov = (px_pos - mean_pos).t() @ (px_pos - mean_pos) / (px_pos.shape[0] - 1)
+        # [(pos_y, pos_x, cov_00, cov_01, cov_10, cov_11)]
+        # all relative to 0-1 image space
+        vec = torch.cat([mean_pos, cov.view(4) * 16])
+        boxes += vec.view(-1, 1, 1).expand_as(boxes) * mask.unsqueeze(0).float()
 
     if downsampling != 1:
-        box_mask = F.upsample(box_mask.unsqueeze(0), scale_factor=downsampling, mode='nearest').data.squeeze(0)
-        box_mask *= downsampling
+        boxes = F.upsample(boxes.unsqueeze(0), scale_factor=downsampling, mode='nearest').data.squeeze(0)
 
-    return box_mask
+    return boxes
 
 
 def resample_data(labels, sdf, box_mask, img, pixel_sizes):
     # labels - [size, size]
     # sdf - [size, size]
-    # box_mask - [4, size, size]
+    # box_mask - [8, size, size]
     # img - [3, size, size]
     # pixel_sizes - [layers count]
     assert labels.shape == sdf.shape
@@ -493,18 +488,19 @@ def resample_data(labels, sdf, box_mask, img, pixel_sizes):
     resampled = []
     for px_size in pixel_sizes:
         assert labels.shape[-1] % px_size == 0
+        assert px_size >= 1
         if px_size == 1:
             res_labels, res_sdf, res_boxes, res_img = labels, sdf, box_mask, img
-        elif px_size < 1:
-            assert round(1 / px_size, 3) == int(1 / px_size)
-            factor = int(1 / px_size)
-            res_labels = F.upsample(labels.view(1, 1, *labels.shape).float(), scale_factor=factor).data[0, 0].long()
-            res_boxes = F.upsample(box_mask.unsqueeze(0), scale_factor=factor).data[0] / px_size
-            res_sdf = F.upsample(sdf.view(1, 1, *sdf.shape), scale_factor=factor, mode='bilinear').data[0, 0]
-            res_img = F.upsample(img.unsqueeze(0), scale_factor=factor, mode='bilinear').data[0]
+        # elif px_size < 1:
+        #     assert round(1 / px_size, 3) == int(1 / px_size)
+        #     factor = int(1 / px_size)
+        #     res_labels = F.upsample(labels.view(1, 1, *labels.shape).float(), scale_factor=factor).data[0, 0].long()
+        #     res_boxes = F.upsample(box_mask.unsqueeze(0), scale_factor=factor).data[0] / px_size
+        #     res_sdf = F.upsample(sdf.view(1, 1, *sdf.shape), scale_factor=factor, mode='bilinear').data[0, 0]
+        #     res_img = F.upsample(img.unsqueeze(0), scale_factor=factor, mode='bilinear').data[0]
         else:
             res_labels = downscale_nonzero(labels, px_size)
-            res_boxes = downscale_nonzero(box_mask, px_size) / px_size
+            res_boxes = downscale_nonzero(box_mask, px_size)
             res_sdf = F.avg_pool2d(Variable(sdf.view(1, 1, *sdf.shape), volatile=True), px_size, px_size).data[0, 0]
             res_img = F.avg_pool2d(Variable(img.unsqueeze(0), volatile=True), px_size, px_size).data[0]
         resampled.append((res_labels, res_sdf, res_boxes, res_img))
@@ -551,24 +547,24 @@ def labels_to_mask_roi_align(labels, boxes, label_nums, crop_size):
     return torch.cat(masks, 0)
 
 
-def aabb_iou(a, b):
-    assert a.dim() == 2 and a.shape[1] == 4
-    assert a.shape == b.shape
-
-    a, b = a.t(), b.t()
-
-    inter_top = torch.max(a[0], b[0])
-    inter_left = torch.max(a[1], b[1])
-    inter_bot = torch.min(a[0] + a[2], b[0] + b[2])
-    inter_right = torch.min(a[1] + a[3], b[1] + b[3])
-
-    intersection = (inter_right - inter_left) * (inter_bot - inter_top)
-    area_a = a[2] * a[3]
-    area_b = b[2] * b[3]
-
-    iou = intersection / (area_a + area_b - intersection)
-    iou[(inter_right < inter_left) | (inter_bot < inter_top)] = 0
-    return iou
+# def aabb_iou(a, b):
+#     assert a.dim() == 2 and a.shape[1] == 4
+#     assert a.shape == b.shape
+#
+#     a, b = a.t(), b.t()
+#
+#     inter_top = torch.max(a[0], b[0])
+#     inter_left = torch.max(a[1], b[1])
+#     inter_bot = torch.min(a[0] + a[2], b[0] + b[2])
+#     inter_right = torch.min(a[1] + a[3], b[1] + b[3])
+#
+#     intersection = (inter_right - inter_left) * (inter_bot - inter_top)
+#     area_a = a[2] * a[3]
+#     area_b = b[2] * b[3]
+#
+#     iou = intersection / (area_a + area_b - intersection)
+#     iou[(inter_right < inter_left) | (inter_bot < inter_top)] = 0
+#     return iou
 
 
 # def center_crop(image, centers, border, centers_img_size):

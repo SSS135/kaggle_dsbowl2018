@@ -84,14 +84,9 @@ class ScoreHead(nn.Module):
 
 
 class BoxHead(nn.Module):
-    def __init__(self, num_filters, region_size,
-                 sizes=((2 ** -0.5, 2 * 2 ** -0.5), (1, 1), (2 * 2 ** -0.5, 2 ** -0.5)),
-                 scales=(2**(-1 / 3), 1, 2**(1 / 3))):
+    def __init__(self, num_filters, region_size):
         super().__init__()
-        self.register_buffer('pixel_boxes', None)
-        pixel_boxes = [(size[0] * scale * region_size, size[1] * scale * region_size)
-                            for size, scale in itertools.product(sizes, scales)]
-        self.pixel_boxes = torch.Tensor(pixel_boxes).float()
+        self.region_size = region_size
         self.layers = nn.Sequential(
             BatchChannels(num_filters),
             ResBlock(num_filters),
@@ -105,7 +100,7 @@ class BoxHead(nn.Module):
             nn.InstanceNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
-            nn.Conv2d(num_filters, len(self.pixel_boxes) * 4, 1),
+            nn.Conv2d(num_filters, 6, 1),
         )
         self.layers[-1].bias.data.fill_(0)
         # self.layers[-1].weight.data.mul_(0.2)
@@ -113,31 +108,17 @@ class BoxHead(nn.Module):
     def forward(self, input, unpadding):
         raw_boxes = unpad(self.layers(input), unpadding).contiguous()
         ih, iw = raw_boxes.shape[2:]
-        # boxes = Variable(boxes.data.fill_(0), requires_grad=True)
-        raw_boxes = raw_boxes.view(raw_boxes.shape[0], len(self.pixel_boxes), 4, *raw_boxes.shape[2:])
-        anchor_sizes = Variable(self.pixel_boxes.view(1, len(self.pixel_boxes), 2, 1, 1))
-        anchor_pos_y = torch.arange(ih).type_as(input.data).view(1, 1, -1, 1).add_(0.5)
-        anchor_pos_x = torch.arange(iw).type_as(input.data).view(1, 1, 1, -1).add_(0.5)
+        anchor_pos_y = torch.arange(ih).type_as(raw_boxes.data).view(1, -1, 1).add_(0.5)
+        anchor_pos_x = torch.arange(iw).type_as(raw_boxes.data).view(1, 1, -1).add_(0.5)
         anchor_pos_y, anchor_pos_x = Variable(anchor_pos_y), Variable(anchor_pos_x)
-        raw_boxes_lim = F.sigmoid(raw_boxes).mul(2).sub(1)
-        b_h = raw_boxes_lim[:, :, 2].exp() * anchor_sizes[:, :, 0]
-        b_w = raw_boxes_lim[:, :, 3].exp() * anchor_sizes[:, :, 1]
-        b_y = raw_boxes_lim[:, :, 0] * anchor_sizes[:, :, 0] + anchor_pos_y - b_h / 2
-        b_x = raw_boxes_lim[:, :, 1] * anchor_sizes[:, :, 1] + anchor_pos_x - b_w / 2
-        # (B, yxhw, NBox, H, W)
-        out_boxes = torch.stack([b_y / ih, b_x / iw, b_h / ih, b_w / iw], 1)
-        anchor_part_shape = 1, len(self.pixel_boxes), anchor_pos_y.numel(), anchor_pos_x.numel()
-        anchor_h = anchor_sizes.data[:, :, 0]
-        anchor_w = anchor_sizes.data[:, :, 1]
-        # (yxhw, NBox, H, W)
-        anchor_boxes = torch.cat([
-            anchor_pos_y.data.sub(anchor_h / 2).expand(*anchor_part_shape),
-            anchor_pos_x.data.sub(anchor_w / 2).expand(*anchor_part_shape),
-            anchor_h.expand(*anchor_part_shape),
-            anchor_w.expand(*anchor_part_shape),
-        ], 0)
-        anchor_boxes.div_(self.pixel_boxes.new([ih, iw, ih, iw]).view(4, 1, 1, 1))
-        return out_boxes, raw_boxes.transpose(1, 2).contiguous(), anchor_boxes
+        b_y = raw_boxes[:, 0] * self.region_size + anchor_pos_y
+        b_x = raw_boxes[:, 1] * self.region_size + anchor_pos_x
+        b_h = raw_boxes[:, 2].exp() * self.region_size
+        b_w = raw_boxes[:, 3].exp() * self.region_size
+        b_dir = raw_boxes[:, 4:6] / raw_boxes[:, 4:6].pow(2).sum(1, keepdim=True).add(1e-6).sqrt()
+        # (B, yxhwsc, H, W)
+        out_boxes = torch.stack([b_y / ih, b_x / iw, b_h / ih, b_w / iw, b_dir[:, 0], b_dir[:, 1]], 1)
+        return out_boxes
 
 
 class VerticalLayerSimple(nn.Module):
@@ -345,7 +326,7 @@ class FPN(nn.Module):
 
         self.mask_head = MaskHead(num_filters, self.region_size, self.mask_size)
         self.box_head = BoxHead(num_filters, self.region_size)
-        self.score_head = ScoreHead(num_filters, len(self.box_head.pixel_boxes))
+        self.score_head = ScoreHead(num_filters, 1)
 
     def freeze_pretrained_layers(self, freeze):
         self.resnet.train(not freeze)
@@ -379,7 +360,8 @@ class FPN(nn.Module):
         return combined_levels
 
     def forward(self, x, output_unpadding=0):
-        if not self.resnet.training:
+        make_features_volatile = not self.resnet.training and not x.volatile
+        if make_features_volatile:
             x = Variable(x.data, volatile=True)
 
         c2 = self.resnet[0](x)
@@ -389,7 +371,7 @@ class FPN(nn.Module):
 
         c2, c3, c4, c5 = [torch.cat(t, 1) for t in (c2, c3, c4, c5)]
 
-        if not self.resnet.training:
+        if make_features_volatile:
             c2, c3, c4, c5 = [Variable(v.data) for v in (c2, c3, c4, c5)]
 
         # Top-down

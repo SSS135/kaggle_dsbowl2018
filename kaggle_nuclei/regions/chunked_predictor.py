@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import itertools
 import math
 
-from ..roi_align import roi_align, pad_boxes
+from ..roi_align import roi_align
 from ..settings import resnet_norm_mean, resnet_norm_std, train_pad, box_padding, train_size
 from ..utils import unpad
 
