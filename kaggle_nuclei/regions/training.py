@@ -419,6 +419,7 @@ def generate_samples_for_layer(model, out_features, out_scores, out_points, labe
 
     mask_mean_cov = out_mean_cov.data[pos_centers_fs_idx]
     mask_boxes = mean_cov_to_mean_scale_rot(mask_mean_cov)
+    mask_boxes[:, 2:4] *= 1 + box_padding
 
     pred_features = roi_align(out_features.unsqueeze(0), mask_boxes, model.region_size)
     img_crops = roi_align(
@@ -434,6 +435,7 @@ def generate_samples_for_layer(model, out_features, out_scores, out_points, labe
 
     true_mask_boxes = true_boxes_fs.view(true_boxes_fs.shape[0], -1)[:, pos_centers_fs_idx].t()
     true_mask_boxes = true_mask_boxes[:, :6]
+    true_mask_boxes[:, 2:4] *= 1 + box_padding
     true_masks = labels_to_mask_roi_align(labels, true_mask_boxes, pos_center_label_nums, model.mask_size, True)
 
     return pred_features, target_masks, pred_scores, target_scores, pred_boxes, target_boxes, img_crops, true_masks
