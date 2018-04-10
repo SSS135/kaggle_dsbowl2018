@@ -86,9 +86,10 @@ class ScoreHead(nn.Module):
 
 
 class BoxHead(nn.Module):
-    def __init__(self, num_filters, region_size):
+    def __init__(self, num_filters, region_size, num_points=32):
         super().__init__()
         self.region_size = region_size
+        self.num_points = num_points
         self.layers = nn.Sequential(
             BatchChannels(num_filters),
             ResBlock(num_filters),
@@ -102,25 +103,22 @@ class BoxHead(nn.Module):
             nn.InstanceNorm2d(num_filters, affine=True),
             nn.ReLU(True),
 
-            nn.Conv2d(num_filters, 6, 1),
+            nn.Conv2d(num_filters, num_points * 2, 1),
         )
         self.layers[-1].bias.data.fill_(0)
         # self.layers[-1].weight.data.mul_(0.2)
 
     def forward(self, input, unpadding):
-        raw_boxes = unpad(self.layers(input), unpadding).contiguous()
-        ih, iw = raw_boxes.shape[2:]
-        anchor_pos_y = torch.arange(ih).type_as(raw_boxes.data).view(1, -1, 1).add_(0.5)
-        anchor_pos_x = torch.arange(iw).type_as(raw_boxes.data).view(1, 1, -1).add_(0.5)
+        raw_points = unpad(self.layers(input), unpadding).contiguous()
+        ih, iw = raw_points.shape[2:]
+        anchor_pos_y = torch.arange(ih).type_as(raw_points.data).view(1, -1, 1).add_(0.5)
+        anchor_pos_x = torch.arange(iw).type_as(raw_points.data).view(1, 1, -1).add_(0.5)
         anchor_pos_y, anchor_pos_x = Variable(anchor_pos_y), Variable(anchor_pos_x)
-        b_y = raw_boxes[:, 0] * self.region_size + anchor_pos_y
-        b_x = raw_boxes[:, 1] * self.region_size + anchor_pos_x
-        b_h = lexp(raw_boxes[:, 2]) * self.region_size * (1 + box_padding)
-        b_w = lexp(raw_boxes[:, 3]) * self.region_size * (1 + box_padding)
-        b_dir = raw_boxes[:, 4:6] / raw_boxes[:, 4:6].pow(2).sum(1, keepdim=True).add(1e-6).sqrt()
-        # (B, yxhwsc, H, W)
-        out_boxes = torch.stack([b_y / ih, b_x / iw, b_h / ih, b_w / iw, b_dir[:, 0], b_dir[:, 1]], 1)
-        return out_boxes
+        b_y = raw_points[:, :self.num_points] * self.region_size + anchor_pos_y
+        b_x = raw_points[:, self.num_points:] * self.region_size + anchor_pos_x
+        # (B, [py * n, px * n], H, W)
+        out_points = torch.cat([b_y / ih, b_x / iw], 1)
+        return out_points
 
 
 class VerticalLayerSimple(nn.Module):

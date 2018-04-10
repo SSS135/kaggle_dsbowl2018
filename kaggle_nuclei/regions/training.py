@@ -334,13 +334,13 @@ def get_train_pairs_single(model, labels, sdf, img, net_out, pixel_sizes,
     return outputs
 
 
-def generate_samples_for_layer(model, out_features, out_scores, out_boxes, labels, sdf, true_boxes, img,
+def generate_samples_for_layer(model, out_features, out_scores, out_points, labels, sdf, true_boxes, img,
                                pos_sdf_threshold, neg_sdf_threshold,
                                pos_size_limit, neg_size_limit,
                                pos_samples, neg_to_pos_ratio):
-    assert out_boxes.dim() == 3 and out_boxes.shape[0] == 6
+    assert out_points.dim() == 3 #and out_points.shape[0] == 6
     assert true_boxes.dim() == 3 and true_boxes.shape[0] == 10
-    assert out_boxes.shape[1] == out_boxes.shape[2]
+    assert out_points.shape[1] == out_points.shape[2]
 
     # border and stride for converting between image space and conv-center space
     stride = model.mask_size // model.region_size
@@ -358,9 +358,9 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     true_boxes_fs = true_boxes[(slice(None), *mask_centers_slice)].contiguous()
 
     assert true_boxes_fs.shape[-1] == out_features.shape[-1], \
-        (true_boxes_fs.shape, out_boxes.shape, out_features.shape, labels.shape, sdf.shape, img.shape)
+        (true_boxes_fs.shape, out_points.shape, out_features.shape, labels.shape, sdf.shape, img.shape)
 
-    anchor_box_size = model.region_size / out_boxes.shape[-1]
+    anchor_box_size = model.region_size / out_points.shape[-1]
     max_pos_size, min_pos_size = anchor_box_size * 2 ** pos_size_limit, anchor_box_size * 2 ** -pos_size_limit
     max_neg_size, min_neg_size = anchor_box_size * 2 ** neg_size_limit, anchor_box_size * 2 ** -neg_size_limit
 
@@ -396,20 +396,29 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     target_scores = out_scores.data.new(pred_scores.shape[0]).fill_(0)
     target_scores[:pred_pos_scores.shape[0]] = 1
 
-    # (NPos, [y, x, h, w, sin, cos])
-    pred_boxes = out_boxes.view(out_boxes.shape[0], -1)[:, pos_centers_fs_idx_all].t()
-    # (NPos, 2, 2)
-    pred_cov = torch.bmm(create_rot_mat(pred_boxes[:, 4:6]), create_scale_mat(pred_boxes[:, 2:4]))
-    pred_cov = torch.bmm(pred_cov.transpose(1, 2), pred_cov)
-    pred_pos = pred_boxes[:, :2]
+    num_points = out_points.shape[0] // 2
+    out_points = out_points.view(num_points * 2, -1).t().contiguous().view(-1, 2, num_points)
+    out_mean = out_points.mean(-1)
+    out_diff = out_points - out_mean.unsqueeze(-1)
+    out_cov = torch.bmm(out_diff, out_diff.transpose(1, 2)) / (num_points - 1) * 16
+    out_mean_cov = torch.cat([out_mean, out_cov.view(-1, 4)], 1)
+
+    # # (NPos, [y * n, x * n])
+    # pred_boxes = out_points.view(out_points.shape[0], -1)[:, pos_centers_fs_idx_all].t().contiguous().view(out_points.shape[0], 2, -1)
+    # pred_pos = pred_boxes.mean(-1)
+    # pred_cov = torch.bmm(pred_boxes, pred_boxes.transpose(1, 2))
+    # # (NPos, 2, 2)
+    # pred_cov = torch.bmm(create_rot_mat(pred_boxes[:, 4:6]), create_scale_mat(pred_boxes[:, 2:4]))
+    # pred_cov = torch.bmm(pred_cov.transpose(1, 2), pred_cov)
+    # pred_pos = pred_boxes[:, :2]
     # (NPos, [y, x, cov00, cov01, cov10, cov11])
-    pred_boxes = torch.cat([pred_pos, pred_cov.view(-1, 4)], 1)
+    pred_boxes = out_mean_cov[pos_centers_fs_idx_all]
     # (NPos, [y, x, cov00, cov01, cov10, cov11])
     target_boxes = true_boxes_fs.view(true_boxes_fs.shape[0], -1)[:, pos_centers_fs_idx_all].t()
     target_boxes = torch.cat([target_boxes[:, :2], target_boxes[:, 6:]], 1)
 
-    # (NPos, [y, x, h, w, sin, cos])
-    mask_boxes = out_boxes.data.view(out_boxes.shape[0], -1)[:, pos_centers_fs_idx].t()
+    mask_mean_cov = out_mean_cov.data[pos_centers_fs_idx]
+    mask_boxes = mean_cov_to_mean_scale_rot(mask_mean_cov)
 
     pred_features = roi_align(out_features.unsqueeze(0), mask_boxes, model.region_size)
     img_crops = roi_align(
@@ -582,17 +591,19 @@ def labels_to_mask_roi_align(labels, boxes, label_nums, crop_size, check_mask):
     return torch.cat(masks, 0)
 
 
+def mean_cov_to_mean_scale_rot(mean_covs):
+    mean_covs = mean_covs.cpu()
+    vecs = []
+    for point in mean_covs:
+        mean, cov = point[:2], point[2:].contiguous().view(2, 2)
+        scale, rot = cov2x2_to_scale_rot(cov)
+        vec = [*mean, *scale, math.sin(rot), math.cos(rot)]
+        vecs.append(vec)
+    return mean_covs.new(vecs)
+
+
 def rotated_box_iou(first_boxes, second_boxes):
-    def mean_cov_to_mean_scale_rot(x):
-        x = x.cpu()
-        vecs = []
-        for point in x:
-            mean, cov = point[:2], point[2:].contiguous().view(2, 2)
-            scale, rot = cov2x2_to_scale_rot(cov)
-            vec = [*mean, *scale, math.sin(rot), math.cos(rot)]
-            vecs.append(vec)
-        return np.array(vecs)
-    first_boxes, second_boxes = mean_cov_to_mean_scale_rot(first_boxes), mean_cov_to_mean_scale_rot(second_boxes)
+    first_boxes, second_boxes = [mean_cov_to_mean_scale_rot(v).numpy() for v in (first_boxes, second_boxes)]
     ious = []
     for a, b in zip(first_boxes, second_boxes):
         a, b = [(*v[:4], math.atan2(v[4], v[5]) / math.pi * 180) for v in (a, b)]
