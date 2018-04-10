@@ -325,7 +325,7 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
                                pos_size_limit, neg_size_limit,
                                pos_samples, neg_to_pos_ratio):
     assert out_boxes.dim() == 3 and out_boxes.shape[0] == 6
-    assert true_boxes.dim() == 3 and true_boxes.shape[0] == 6
+    assert true_boxes.dim() == 3 and true_boxes.shape[0] == 10
     assert out_boxes.shape[1] == out_boxes.shape[2]
 
     # border and stride for converting between image space and conv-center space
@@ -353,7 +353,7 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     true_box_area = true_boxes_fs[2] * true_boxes_fs[3]
     true_box_size = true_box_area ** 0.5
 
-    assert true_box_size.min() >= 0
+    # assert true_box_size.min() >= 0
 
     pos_centers_fs = (true_box_size > min_pos_size) & \
                      (true_box_size < max_pos_size) & \
@@ -384,21 +384,18 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
 
     # (NPos, [y, x, h, w, sin, cos])
     pred_boxes = out_boxes.view(out_boxes.shape[0], -1)[:, pos_centers_fs_idx_all].t()
-    # # (NPos, 2, 2)
-    # pred_cov = torch.bmm(create_scale_mat(pred_boxes[:, 2:4]), create_rot_mat(pred_boxes[:, 4:6]))
-    # pred_cov = torch.bmm(pred_cov.transpose(1, 2), pred_cov)
-    # pred_pos = pred_boxes[:, :2]
-    # # (NPos, [y, x, cov00, cov01, cov10, cov11])
-    # pred_boxes = torch.cat([pred_pos, pred_cov.view(-1, 4)], 1)
+    # (NPos, 2, 2)
+    pred_cov = torch.bmm(create_scale_mat(pred_boxes[:, 2:4]), create_rot_mat(pred_boxes[:, 4:6]))
+    pred_cov = torch.bmm(pred_cov.transpose(1, 2), pred_cov)
+    pred_pos = pred_boxes[:, :2]
+    # (NPos, [y, x, cov00, cov01, cov10, cov11])
+    pred_boxes = torch.cat([pred_pos, pred_cov.view(-1, 4)], 1)
     # (NPos, [y, x, cov00, cov01, cov10, cov11])
     target_boxes = true_boxes_fs.view(true_boxes_fs.shape[0], -1)[:, pos_centers_fs_idx_all].t()
-    # target_boxes[:, 2:] *= (1 + box_padding) ** 2
+    target_boxes = torch.cat([target_boxes[:, :2], target_boxes[:, 6:]], 1)
 
     # (NPos, [y, x, h, w, sin, cos])
     mask_boxes = out_boxes.data.view(out_boxes.shape[0], -1)[:, pos_centers_fs_idx].t()
-
-    # print('Mask Box', mask_boxes)
-    # print('True Box', true_boxes_fs.view(true_boxes_fs.shape[0], -1)[:, pos_centers_fmap_idx].t())
 
     pred_features = roi_align(out_features.unsqueeze(0), mask_boxes, model.region_size)
     img_crops = roi_align(
@@ -409,10 +406,11 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
 
     # NPos - labels at center of true boxes
     pos_center_label_nums = labels_fs.take(pos_centers_fs_idx)
-    assert (pos_center_label_nums == 0).sum() == 0
+    # assert (pos_center_label_nums == 0).sum() == 0
     target_masks = labels_to_mask_roi_align(labels, mask_boxes, pos_center_label_nums, model.mask_size, False)
 
     true_mask_boxes = true_boxes_fs.view(true_boxes_fs.shape[0], -1)[:, pos_centers_fs_idx].t()
+    true_mask_boxes = true_mask_boxes[:, :6]
     true_masks = labels_to_mask_roi_align(labels, true_mask_boxes, pos_center_label_nums, model.mask_size, True)
 
     return pred_features, target_masks, pred_scores, target_scores, pred_boxes, target_boxes, img_crops, true_masks
@@ -443,12 +441,13 @@ def get_object_boxes(labels, downsampling=1):
     # if downsampling != 1:
     #     labels = downscale_nonzero(labels, downsampling)
 
+    channels = 10
     size = labels.shape[0]
     count = labels.max()
     if count == 0:
-        return torch.zeros(6, size, size).cuda()#torch.zeros(6, size * downsampling, size * downsampling).cuda()
+        return torch.zeros(channels, size, size).cuda()#torch.zeros(6, size * downsampling, size * downsampling).cuda()
 
-    boxes = torch.zeros(6, size, size).cuda()
+    boxes = torch.zeros(channels, size, size).cuda()
 
     for label_num in range(1, count + 1):
         mask = labels == label_num
@@ -466,8 +465,8 @@ def get_object_boxes(labels, downsampling=1):
 
         # [(pos_y, pos_x, scale_max, scale_min, sin, cos)]
         # all relative to 0-1 image space
-        vec = torch.Tensor([*mean_pos, *scale, math.sin(rot), math.cos(rot)]).cuda()
-        boxes += vec.view(6, 1, 1).expand_as(boxes) * mask.unsqueeze(0).float()
+        vec = torch.Tensor([*mean_pos, *scale, math.sin(rot), math.cos(rot), *cov.view(4)]).cuda()
+        boxes += vec.view(channels, 1, 1).expand_as(boxes) * mask.unsqueeze(0).float()
 
     # if downsampling != 1:
     #     boxes = F.upsample(boxes.unsqueeze(0), scale_factor=downsampling, mode='nearest').data.squeeze(0)
@@ -479,10 +478,12 @@ def cov2x2_to_scale_rot(cov):
     assert cov.shape == (2, 2)
     cov = cov.cpu().numpy()
     e, v = np.linalg.eigh(cov)
+    orig_e, orig_v = e, v
     if e[0] < e[1]:
         e = e[::-1]
         angle90 = np.pi / 2
         v = v @ np.array([[math.cos(angle90), math.sin(angle90)], [-math.sin(angle90), math.cos(angle90)]])
+    assert np.all(e > 0), (cov, e, orig_e, v, orig_v)
     scale = e ** 0.5
     m = (v * scale).T
     angle = -math.atan2(-m[0, 1], m[0, 0])
@@ -559,16 +560,25 @@ def labels_to_mask_roi_align(labels, boxes, label_nums, crop_size, check_mask):
     masks = []
     for box, label_num in zip(boxes, label_nums):
         full_mask = (labels == label_num).view(1, 1, *labels.shape).float()
-        assert not check_mask or full_mask.sum() > 9
+        # assert not check_mask or full_mask.sum() > 9
         mask = roi_align(Variable(full_mask, volatile=True), box.unsqueeze(0), crop_size).data
-        assert not check_mask or mask.sum() > 9, \
-            (box, (labels == label_num).nonzero().float().add_(0.5).div_(labels.shape[-1]).mean(0), labels.shape)
+        # assert not check_mask or mask.sum() > 9, \
+        #     (box, (labels == label_num).nonzero().float().add_(0.5).div_(labels.shape[-1]).mean(0), labels.shape)
         masks.append(mask)
     return torch.cat(masks, 0)
 
 
 def rotated_box_iou(first_boxes, second_boxes):
-    first_boxes, second_boxes = first_boxes.cpu().numpy(), second_boxes.cpu().numpy()
+    def mean_cov_to_mean_scale_rot(x):
+        x = x.cpu()
+        vecs = []
+        for point in x:
+            mean, cov = point[:2], point[2:].contiguous().view(2, 2)
+            scale, rot = cov2x2_to_scale_rot(cov)
+            vec = [*mean, *scale, math.sin(rot), math.cos(rot)]
+            vecs.append(vec)
+        return np.array(vecs)
+    first_boxes, second_boxes = mean_cov_to_mean_scale_rot(first_boxes), mean_cov_to_mean_scale_rot(second_boxes)
     ious = []
     for a, b in zip(first_boxes, second_boxes):
         a, b = [(*v[:4], math.atan2(v[4], v[5]) / math.pi * 180) for v in (a, b)]
@@ -576,3 +586,4 @@ def rotated_box_iou(first_boxes, second_boxes):
         union = a[2] * a[3] + b[2] * b[3] - inter
         ious.append(inter / union)
     return torch.Tensor(ious)
+
