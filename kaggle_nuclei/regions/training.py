@@ -32,6 +32,7 @@ from ..settings import box_padding, train_pad, resnet_norm_mean, resnet_norm_std
 from ..losses import soft_dice_loss_with_logits
 from optfn.gated_instance_norm import GatedInstanceNorm2d
 from optfn.eval_batch_norm import EvalBatchNorm2d
+from ..grad_running_norm import GradRunningNorm
 
 
 def binary_cross_entropy_with_logits(x, z, reduce=True):
@@ -118,6 +119,13 @@ class Trainer:
         self.summary: SummaryWriter = None
         self.optim_iter = 0
         self.scalar_history = dict()
+        self.grn_full_mask = GradRunningNorm(0.1).cuda()
+        self.grn_full_contour = GradRunningNorm(0.1).cuda()
+        self.grn_full_sdf = GradRunningNorm(0.1).cuda()
+        self.grn_patch_mask = GradRunningNorm().cuda()
+        self.grn_score = GradRunningNorm().cuda()
+        self.grn_box_mean = GradRunningNorm().cuda()
+        self.grn_box_cov = GradRunningNorm().cuda()
 
     def train(self, train_data, epochs=15, pretrain_epochs=7, saved_model=None, model_save_path=None):
         self.dataset = NucleiDataset(train_data)
@@ -195,13 +203,14 @@ class Trainer:
         target_scores = Variable(target_scores)
         target_boxes = Variable(target_boxes)
 
-        img_mask_loss = 0.1 * soft_dice_loss_with_logits(img_mask_out, mask_train)
-        img_cont_loss = 0.5 * binary_focal_loss_with_logits(img_cont_out, cont_train.clamp(0.05, 0.95))
-        img_sdf_loss = 0.5 * binary_focal_loss_with_logits(img_sdf_out, sdf_train.clamp(0.05, 0.95))
+        img_mask_loss = soft_dice_loss_with_logits(self.grn_full_mask(img_mask_out), mask_train)
+        img_cont_loss = binary_focal_loss_with_logits(self.grn_full_contour(img_cont_out), cont_train.clamp(0.05, 0.95))
+        img_sdf_loss = binary_focal_loss_with_logits(self.grn_full_sdf(img_sdf_out), sdf_train.clamp(0.05, 0.95))
 
-        mask_loss = 0.5 * soft_dice_loss_with_logits(pred_masks, target_masks)
-        score_loss = 2 * binary_focal_loss_with_logits(pred_scores, target_scores.clamp(0.05, 0.95))
-        box_loss = F.mse_loss(pred_boxes, target_boxes)
+        mask_loss = soft_dice_loss_with_logits(self.grn_patch_mask(pred_masks), target_masks)
+        score_loss = binary_focal_loss_with_logits(self.grn_score(pred_scores), target_scores.clamp(0.05, 0.95))
+        box_loss = F.mse_loss(self.grn_box_mean(pred_boxes[:, :2]), target_boxes[:, :2]) + \
+                   F.l1_loss(self.grn_box_cov(pred_boxes[:, 2:]), target_boxes[:, 2:])
         reg_loss = 1e-3 * get_reg_loss(self.model_gen)
 
         loss = mask_loss + box_loss + score_loss + img_mask_loss + img_sdf_loss + img_cont_loss + reg_loss
@@ -477,14 +486,14 @@ def get_object_boxes(labels, downsampling=1):
 def cov2x2_to_scale_rot(cov):
     assert cov.shape == (2, 2)
     cov = cov.cpu().numpy()
-    e, v = np.linalg.eigh(cov)
+    e, v = np.linalg.eig(cov)
     orig_e, orig_v = e, v
     if e[0] < e[1]:
         e = e[::-1]
         angle90 = np.pi / 2
         v = v @ np.array([[math.cos(angle90), math.sin(angle90)], [-math.sin(angle90), math.cos(angle90)]])
-    assert np.all(e > 0), (cov, e, orig_e, v, orig_v)
-    scale = e ** 0.5
+    assert np.all(e > -1e-4), (cov, e, orig_e, v, orig_v)
+    scale = e.clip(min=1e-8) ** 0.5
     m = (v * scale).T
     angle = -math.atan2(-m[0, 1], m[0, 0])
     if angle < -math.pi / 2:
