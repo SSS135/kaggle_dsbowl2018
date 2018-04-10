@@ -243,7 +243,7 @@ class Trainer:
             self.summary.add_image('Predicted Score', torch.sigmoid(scores), optim_iter)
             self.summary.add_image('Predicted Mask Patches', make_grid(pred_masks.data[:16].sigmoid(), nrow=4), optim_iter)
             self.summary.add_image('Target Mask Patches', make_grid(target_masks.data[:16].sigmoid(), nrow=4), optim_iter)
-            self.summary.add_image('Predicted Image Patches', make_grid(img_crops[:16].sigmoid(), nrow=4), optim_iter)
+            self.summary.add_image('Target Image Patches', make_grid(img_crops[:16].sigmoid(), nrow=4), optim_iter)
             self.summary.add_image('True Mask Patches', make_grid(true_masks[:16].sigmoid(), nrow=4), optim_iter)
 
         self.add_scalar_averaged('Batch Time', batch_time, optim_iter)

@@ -14,6 +14,7 @@ from torch.nn.modules.instancenorm import _InstanceNorm
 from torchvision.models import resnet50
 
 from ..utils import unpad
+from ..lexp import lexp
 
 
 class MaskHead(nn.Module):
@@ -113,8 +114,8 @@ class BoxHead(nn.Module):
         anchor_pos_y, anchor_pos_x = Variable(anchor_pos_y), Variable(anchor_pos_x)
         b_y = raw_boxes[:, 0] * self.region_size + anchor_pos_y
         b_x = raw_boxes[:, 1] * self.region_size + anchor_pos_x
-        b_h = raw_boxes[:, 2].exp() * self.region_size
-        b_w = raw_boxes[:, 3].exp() * self.region_size
+        b_h = lexp(raw_boxes[:, 2]) * self.region_size
+        b_w = lexp(raw_boxes[:, 3]) * self.region_size
         b_dir = raw_boxes[:, 4:6] / raw_boxes[:, 4:6].pow(2).sum(1, keepdim=True).add(1e-6).sqrt()
         # (B, yxhwsc, H, W)
         out_boxes = torch.stack([b_y / ih, b_x / iw, b_h / ih, b_w / iw, b_dir[:, 0], b_dir[:, 1]], 1)
