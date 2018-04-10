@@ -231,29 +231,34 @@ class Trainer:
         batch_time = time.time() - self.prev_batch_time
         self.prev_batch_time = time.time()
 
-        if optim_iter >= 100 and optim_iter % 100 == 0:
-            unpad_slice = (Ellipsis, slice(train_pad, -train_pad), slice(train_pad, -train_pad))
+        if optim_iter >= 50 and optim_iter % 50 == 0:
             resnet_std = data[0].new(resnet_norm_std).view(-1, 1, 1)
             resnet_mean = data[0].new(resnet_norm_mean).view(-1, 1, 1)
             img_unnorm = data[0].mul(resnet_std).add_(resnet_mean)
+            img_crops_unnorm = img_crops.mul(resnet_std.cuda()).add_(resnet_mean.cuda())
             good_looking_mask = data[1].float().mul(1 / (data[1].max() + 10)).clamp_(0, 1)
+            crop_idx = torch.randperm(pred_masks.shape[0])[:36].cuda()
 
             up_shape = model_out_layers[0][1].shape[2:]
-            scores = torch.cat([F.upsample(l[1], size=up_shape, mode='bilinear') for l in model_out_layers], 1)
+            scores = torch.cat([F.upsample(l[1].data, size=up_shape, mode='bilinear').data for l in model_out_layers], 1)
             scores = scores[..., train_pad // 4: -train_pad // 4, train_pad // 4: -train_pad // 4]
 
-            self.summary.add_image('Train Image', img_unnorm[unpad_slice], optim_iter)
-            self.summary.add_image('Train Mask', good_looking_mask[unpad_slice], optim_iter)
-            self.summary.add_image('Train SDF', sdf_train.data[unpad_slice], optim_iter)
-            self.summary.add_image('Train Contour', cont_train.data[unpad_slice], optim_iter)
-            self.summary.add_image('Predicted Mask', torch.sigmoid(img_mask_out.data[unpad_slice]), optim_iter)
-            self.summary.add_image('Predicted SDF', torch.sigmoid(img_sdf_out.data[unpad_slice]), optim_iter)
-            self.summary.add_image('Predicted Contour', torch.sigmoid(img_cont_out.data[unpad_slice]), optim_iter)
+            self.summary.add_image('Train Image', img_unnorm, optim_iter)
+            self.summary.add_image('Train Mask', good_looking_mask, optim_iter)
+            self.summary.add_image('Train SDF', sdf_train.data, optim_iter)
+            self.summary.add_image('Train Contour', cont_train.data, optim_iter)
+            self.summary.add_image('Predicted Mask', torch.sigmoid(img_mask_out.data), optim_iter)
+            self.summary.add_image('Predicted SDF', torch.sigmoid(img_sdf_out.data), optim_iter)
+            self.summary.add_image('Predicted Contour', torch.sigmoid(img_cont_out.data), optim_iter)
             self.summary.add_image('Predicted Score', torch.sigmoid(scores), optim_iter)
-            self.summary.add_image('Predicted Mask Patches', make_grid(pred_masks.data[:16].sigmoid(), nrow=4), optim_iter)
-            self.summary.add_image('Target Mask Patches', make_grid(target_masks.data[:16].sigmoid(), nrow=4), optim_iter)
-            self.summary.add_image('Target Image Patches', make_grid(img_crops[:16].sigmoid(), nrow=4), optim_iter)
-            self.summary.add_image('True Mask Patches', make_grid(true_masks[:16].sigmoid(), nrow=4), optim_iter)
+            self.summary.add_image('Predicted Mask Patches',
+                                   make_grid(pred_masks.data[crop_idx].sigmoid(), nrow=6), optim_iter)
+            self.summary.add_image('Target Mask Patches',
+                                   make_grid(target_masks.data[crop_idx].sigmoid(), nrow=6), optim_iter)
+            self.summary.add_image('Target Image Patches',
+                                   make_grid(img_crops_unnorm[crop_idx], nrow=6), optim_iter)
+            self.summary.add_image('True Mask Patches',
+                                   make_grid(true_masks[crop_idx].sigmoid(), nrow=6), optim_iter)
 
         self.add_scalar_averaged('Batch Time', batch_time, optim_iter)
         self.add_scalar_averaged('Score FScore', score_fscore, optim_iter)
@@ -394,7 +399,7 @@ def generate_samples_for_layer(model, out_features, out_scores, out_boxes, label
     # (NPos, [y, x, h, w, sin, cos])
     pred_boxes = out_boxes.view(out_boxes.shape[0], -1)[:, pos_centers_fs_idx_all].t()
     # (NPos, 2, 2)
-    pred_cov = torch.bmm(create_scale_mat(pred_boxes[:, 2:4]), create_rot_mat(pred_boxes[:, 4:6]))
+    pred_cov = torch.bmm(create_rot_mat(pred_boxes[:, 4:6]), create_scale_mat(pred_boxes[:, 2:4]))
     pred_cov = torch.bmm(pred_cov.transpose(1, 2), pred_cov)
     pred_pos = pred_boxes[:, :2]
     # (NPos, [y, x, cov00, cov01, cov10, cov11])
