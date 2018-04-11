@@ -32,7 +32,7 @@ from ..settings import box_padding, train_pad, resnet_norm_mean, resnet_norm_std
 from ..losses import soft_dice_loss_with_logits
 from optfn.gated_instance_norm import GatedInstanceNorm2d
 from optfn.eval_batch_norm import EvalBatchNorm2d
-from ..grad_running_norm import GradRunningNorm
+from optfn.grad_running_norm import GradRunningNorm
 
 
 def binary_cross_entropy_with_logits(x, z, reduce=True):

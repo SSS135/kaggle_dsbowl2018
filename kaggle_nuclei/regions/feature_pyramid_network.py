@@ -14,7 +14,6 @@ from torch.nn.modules.instancenorm import _InstanceNorm
 from torchvision.models import resnet50
 
 from ..utils import unpad
-from ..lexp import lexp
 from ..settings import box_padding
 
 
