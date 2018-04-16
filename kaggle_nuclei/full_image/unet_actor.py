@@ -13,8 +13,8 @@ except:
 
 
 class UNetActorCritic(rl.models.Actor):
-    def __init__(self, obs_space, action_space, **kwargs):
-        super().__init__(obs_space, action_space, **kwargs)
+    def __init__(self, observation_space, action_space, **kwargs):
+        super().__init__(observation_space, action_space, **kwargs)
         self.unet = UNet(3, 3)
 
     def forward(self, input) -> rl.models.ActorOutput:
@@ -29,8 +29,8 @@ class UNetActorCritic(rl.models.Actor):
 
 
 class SimpleCNNActor(rl.models.Actor):
-    def __init__(self, obs_space, action_space, **kwargs):
-        super().__init__(obs_space, action_space, **kwargs)
+    def __init__(self, observation_space, action_space, **kwargs):
+        super().__init__(observation_space, action_space, **kwargs)
         self.conv1 = nn.Conv2d(3, 16, 7, stride=1, padding=3)
         self.conv2 = nn.Conv2d(16, 32, 7, stride=1, padding=3)
         self.conv3 = nn.Conv2d(32, 3, 7, stride=1, padding=3)
