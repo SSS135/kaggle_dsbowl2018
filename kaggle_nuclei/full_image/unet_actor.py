@@ -25,7 +25,7 @@ class UNetActorCritic(rl.models.Actor):
         values = values * 0
         values = values.contiguous().view(bs, -1).mean(-1)
         probs = torch.cat([mean.contiguous().view(bs, -1), logstd.contiguous().view(bs, -1)], 1)
-        return rl.models.ActorOutput(probs=probs, state_values=values)
+        return rl.models.ActorOutput(probs=probs, state_value=values)
 
 
 class SimpleCNNActor(rl.models.Actor):
@@ -52,4 +52,4 @@ class SimpleCNNActor(rl.models.Actor):
         values = values * 0
         values = values.contiguous().view(bs, -1).mean(-1)
         probs = torch.cat([mean.contiguous().view(bs, -1), logstd.contiguous().view(bs, -1)], 1)
-        return rl.models.ActorOutput(probs=probs, state_values=values)
+        return rl.models.ActorOutput(probs=probs, state_value=values)
